@@ -90,24 +90,13 @@ const SDR_COLOR_FORMATS: [Fourcc; 4] = [
     Fourcc::Abgr8888,
 ];
 
-/// Scanout formats offered on HDR outputs: 10-bit preferred (needed so the PQ signal isn't crushed),
-/// falling back to 8-bit if the GPU won't scan out 10-bit at the chosen mode.
-const HDR_COLOR_FORMATS: [Fourcc; 8] = [
-    Fourcc::Xrgb2101010,
-    Fourcc::Xbgr2101010,
-    Fourcc::Argb2101010,
-    Fourcc::Abgr2101010,
-    Fourcc::Xrgb8888,
-    Fourcc::Xbgr8888,
-    Fourcc::Argb8888,
-    Fourcc::Abgr8888,
-];
-
+// Prefer XB30/AB30 for multi-GPU copies: the proprietary NVIDIA driver does not support XR30/AR30.
+// The per-format render probe below can still retain the latter when the preferred pair is unusable.
 const HDR_TEN_BIT_COLOR_FORMATS: [Fourcc; 4] = [
-    Fourcc::Xrgb2101010,
     Fourcc::Xbgr2101010,
-    Fourcc::Argb2101010,
     Fourcc::Abgr2101010,
+    Fourcc::Xrgb2101010,
+    Fourcc::Argb2101010,
 ];
 
 pub struct Tty {
@@ -3281,13 +3270,15 @@ fn surface_dmabuf_feedback(
         .clone()
         .add_preference_tranche(
             surface_scanout_node.dev_id(),
-            Some(TrancheFlags::Scanout),
+            TrancheFlags::Scanout,
             primary_scanout_formats,
+            4..=6,
         )
         .add_preference_tranche(
             surface_scanout_node.dev_id(),
-            Some(TrancheFlags::Scanout),
+            TrancheFlags::Scanout,
             primary_or_overlay_scanout_formats,
+            4..=6,
         )
         .build()?;
 

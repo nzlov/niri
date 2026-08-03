@@ -146,11 +146,6 @@ use crate::layout::{
 use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
-use smithay::wayland::color::management::{
-    ColorManagementState, ColorManagementSurfaceCachedState, Feature, ImageDescription,
-    Primaries as CmPrimaries, PrimariesOption as CmPrimariesOption, RenderIntent,
-    TransferFunction as CmTransferFunction,
-};
 use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
@@ -191,6 +186,11 @@ use crate::utils::{
 };
 use crate::window::mapped::MappedId;
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
+use smithay::wayland::color::management::{
+    ColorManagementState, ColorManagementSurfaceCachedState, Feature, ImageDescription,
+    Primaries as CmPrimaries, PrimariesOption as CmPrimariesOption, RenderIntent,
+    TransferFunction as CmTransferFunction,
+};
 
 const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 
@@ -411,7 +411,7 @@ pub struct Niri {
     #[cfg(feature = "dbus")]
     pub dbus: Option<crate::dbus::DBusServers>,
     #[cfg(feature = "dbus")]
-    pub a11y_keyboard_monitor: Option<crate::dbus::freedesktop_a11y::KeyboardMonitor>,
+    pub a11y_manager: Option<crate::dbus::freedesktop_a11y::Manager>,
     #[cfg(feature = "dbus")]
     pub a11y: A11y,
     #[cfg(feature = "dbus")]
@@ -2863,7 +2863,7 @@ impl Niri {
             #[cfg(feature = "dbus")]
             dbus: None,
             #[cfg(feature = "dbus")]
-            a11y_keyboard_monitor: None,
+            a11y_manager: None,
             #[cfg(feature = "dbus")]
             a11y,
             #[cfg(feature = "dbus")]

@@ -26,6 +26,7 @@ use smithay::input::pointer::{
     GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
     GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab, RelativeMotionEvent,
 };
+use smithay::input::tablet::{self, TabletDescriptor, TabletSeatTrait};
 use smithay::input::touch::{
     DownEvent, GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, UpEvent,
 };
@@ -36,7 +37,6 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
-use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 use touch_overview_grab::TouchOverviewGrab;
 
 use self::move_grab::MoveGrab;
@@ -245,7 +245,7 @@ impl State {
             let tablet_seat = self.niri.seat.tablet_seat();
 
             let desc = TabletDescriptor::from(&device);
-            tablet_seat.add_tablet::<Self>(&self.niri.display_handle, &desc);
+            tablet_seat.add_wp_tablet(&self.niri.display_handle, &desc);
         }
         if device.has_capability(DeviceCapability::Touch) && self.niri.seat.get_touch().is_none() {
             self.niri.seat.add_touch();
@@ -2650,6 +2650,10 @@ impl State {
             }
         }
 
+        // Notify a11y.
+        #[cfg(feature = "dbus")]
+        self.a11y_notify_pointer_motion();
+
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
         self.niri.queue_redraw_all();
@@ -2741,6 +2745,10 @@ impl State {
                 self.niri.layout.dnd_update(output, pos_within_output);
             }
         }
+
+        // Notify a11y.
+        #[cfg(feature = "dbus")]
+        self.a11y_notify_pointer_motion();
 
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
@@ -3582,33 +3590,29 @@ impl State {
         let tablet_seat = self.niri.seat.tablet_seat();
         let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
         let tool = tablet_seat.get_tool(&event.tool());
-        if let (Some(tablet), Some(tool)) = (tablet, tool) {
-            if event.pressure_has_changed() {
-                tool.pressure(event.pressure());
-            }
-            if event.distance_has_changed() {
-                tool.distance(event.distance());
-            }
-            if event.tilt_has_changed() {
-                tool.tilt(event.tilt());
-            }
-            if event.slider_has_changed() {
-                tool.slider_position(event.slider_position());
-            }
-            if event.rotation_has_changed() {
-                tool.rotation(event.rotation());
-            }
-            if event.wheel_has_changed() {
-                tool.wheel(event.wheel_delta(), event.wheel_delta_discrete());
-            }
+        if let (Some(_tablet), Some(tool)) = (tablet, tool) {
+            let frame = tablet::tool::AxisFrame {
+                pressure: event.pressure_has_changed().then(|| event.pressure()),
+                distance: event.distance_has_changed().then(|| event.distance()),
+                tilt: event.tilt_has_changed().then(|| event.tilt()),
+                rotation: event.rotation_has_changed().then(|| event.rotation()),
+                slider: event.slider_has_changed().then(|| event.slider_position()),
+                wheel: event
+                    .wheel_has_changed()
+                    .then(|| (event.wheel_delta(), event.wheel_delta_discrete())),
+            };
 
+            tool.axis(self, frame);
             tool.motion(
-                pos,
+                self,
                 under.surface,
-                &tablet,
-                SERIAL_COUNTER.next_serial(),
-                event.time_msec(),
+                &tablet::tool::MotionEvent {
+                    location: pos,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
             );
+            tool.frame(self, event.time_msec());
 
             self.niri.pointer_visibility = PointerVisibility::Visible;
             self.niri.tablet_cursor_location = Some(pos);
@@ -3632,7 +3636,13 @@ impl State {
         match tip_state {
             TabletToolTipState::Down => {
                 let serial = SERIAL_COUNTER.next_serial();
-                tool.tip_down(serial, event.time_msec());
+                tool.down(
+                    self,
+                    &tablet::tool::DownEvent {
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
 
                 if let Some(pos) = self.niri.tablet_cursor_location {
                     let under = self.niri.contents_under(pos);
@@ -3722,9 +3732,17 @@ impl State {
                     }
                 }
 
-                tool.tip_up(event.time_msec());
+                tool.up(
+                    self,
+                    &tablet::tool::UpEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                    },
+                );
             }
         }
+
+        tool.frame(self, event.time_msec());
     }
 
     fn on_tablet_tool_proximity<I: InputBackend>(&mut self, event: I::TabletToolProximityEvent)
@@ -3739,25 +3757,46 @@ impl State {
 
         let tablet_seat = self.niri.seat.tablet_seat();
         let display_handle = self.niri.display_handle.clone();
-        let tool = tablet_seat.add_tool::<Self>(self, &display_handle, &event.tool());
+        let tool = tablet_seat
+            .get_tool(&event.tool())
+            .unwrap_or_else(|| tablet_seat.add_wp_tool(self, &display_handle, &event.tool()));
         let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
         if let Some(tablet) = tablet {
+            let frame = tablet::tool::AxisFrame {
+                pressure: event.pressure_has_changed().then(|| event.pressure()),
+                distance: event.distance_has_changed().then(|| event.distance()),
+                tilt: event.tilt_has_changed().then(|| event.tilt()),
+                rotation: event.rotation_has_changed().then(|| event.rotation()),
+                slider: event.slider_has_changed().then(|| event.slider_position()),
+                wheel: event
+                    .wheel_has_changed()
+                    .then(|| (event.wheel_delta(), event.wheel_delta_discrete())),
+            };
+
             match event.state() {
                 ProximityState::In => {
-                    if let Some(under) = under.surface {
-                        tool.proximity_in(
-                            pos,
-                            under,
-                            &tablet,
-                            SERIAL_COUNTER.next_serial(),
-                            event.time_msec(),
-                        );
-                    }
+                    tool.proximity_in(
+                        self,
+                        under.surface,
+                        tablet,
+                        &tablet::tool::ProximityInEvent {
+                            location: pos,
+                            axis: Some(frame),
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
                     self.niri.pointer_visibility = PointerVisibility::Visible;
                     self.niri.tablet_cursor_location = Some(pos);
                 }
                 ProximityState::Out => {
-                    tool.proximity_out(event.time_msec());
+                    tool.proximity_out(
+                        self,
+                        &tablet::tool::ProximityOutEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
 
                     // Move the mouse pointer here to avoid discontinuity.
                     //
@@ -3771,6 +3810,8 @@ impl State {
                     self.niri.tablet_cursor_location = None;
                 }
             }
+
+            tool.frame(self, event.time_msec());
 
             // FIXME: granular.
             self.niri.queue_redraw_all();
@@ -3824,11 +3865,15 @@ impl State {
             }
 
             tool.button(
-                button,
-                event.button_state(),
-                SERIAL_COUNTER.next_serial(),
-                event.time_msec(),
+                self,
+                &tablet::tool::ButtonEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    button,
+                    state: event.button_state(),
+                    time: event.time_msec(),
+                },
             );
+            tool.frame(self, event.time_msec());
         }
     }
 
