@@ -4,7 +4,7 @@
 //! aborts the process — so any handler panic shows up here as a failing test.
 
 use niri_config::output::Hdr;
-use niri_config::{Config, Output};
+use niri_config::{Config, FloatOrInt, Output};
 use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_manager_v1::{
     Primaries, RenderIntent, TransferFunction,
 };
@@ -96,13 +96,17 @@ fn create_parametric_hdr_description_like_mpv() {
 fn fixture_with_hdr_mode_on() -> Fixture {
     use niri_config::output::HdrMode;
 
+    fixture_with_hdr_config(Hdr {
+        mode: HdrMode::On,
+        ..Default::default()
+    })
+}
+
+fn fixture_with_hdr_config(hdr: Hdr) -> Fixture {
     let mut config = Config::default();
     config.outputs.0.push(Output {
         name: "headless-1".to_owned(),
-        hdr: Some(Hdr {
-            mode: HdrMode::On,
-            ..Default::default()
-        }),
+        hdr: Some(hdr),
         ..Default::default()
     });
     let mut f = Fixture::with_config(config);
@@ -345,6 +349,26 @@ fn output_description_luminances_satisfy_wine_hdr_check() {
         max_target_lum > reference_lum,
         "wine's HDR display detection requires max target luminance > reference white"
     );
+}
+
+#[test]
+fn configured_hdr_luminances_have_distinct_roles() {
+    use niri_config::output::HdrMode;
+
+    let mut f = fixture_with_hdr_config(Hdr {
+        mode: HdrMode::On,
+        max_luminance: Some(FloatOrInt(1000.)),
+        paper_white: Some(FloatOrInt(250.)),
+        sdr_brightness: Some(FloatOrInt(300.)),
+        ..Default::default()
+    });
+    let output = f.niri_output(1);
+    let desc = f.niri().output_blend_description(&output);
+
+    assert_eq!(desc.luminances, Some((100, 1000, 250)));
+    assert_eq!(desc.max_cll, Some(1000));
+    assert_eq!(desc.max_fall, Some(600));
+    assert_eq!(f.niri().output_capture_reference_luminance(&output), 300.);
 }
 
 #[test]

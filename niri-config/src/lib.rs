@@ -1172,6 +1172,9 @@ mod tests {
                         hdr: Some(
                             Hdr {
                                 mode: On,
+                                max_luminance: None,
+                                paper_white: None,
+                                sdr_brightness: None,
                                 reference_luminance: Some(
                                     FloatOrInt(
                                         203.0,

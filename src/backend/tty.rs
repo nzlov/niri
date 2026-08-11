@@ -2198,7 +2198,7 @@ impl Tty {
         // The connector state is only *staged* here; smithay applies it inside its own commit
         // as a single atomic modeset together with mode, CRTC and plane state (committing
         // connector color properties standalone hangs some drivers, notably nvidia).
-        let (blend_hdr, hdr_content, reference_luminance) = {
+        let (blend_hdr, hdr_content, sdr_brightness) = {
             let config = self.config.borrow();
             let output_config = config.outputs.find(&surface.name);
             let hdr_config = output_config.and_then(|o| o.hdr.clone());
@@ -2207,11 +2207,14 @@ impl Tty {
                 .map(|o| effective_max_bpc(o, &surface.max_bpc_range))
                 .unwrap_or(None);
             let always_on = hdr_config.as_ref().is_some_and(|h| h.mode == HdrMode::On);
-            let reference_luminance = hdr_config
+            let sdr_brightness = hdr_config
                 .as_ref()
-                .and_then(|h| h.reference_luminance)
-                .map(|v| v.0)
+                .map(|hdr| hdr.effective_sdr_brightness())
                 .unwrap_or(DEFAULT_REFERENCE_LUMINANCE);
+            let max_luminance = hdr_config
+                .as_ref()
+                .and_then(|hdr| hdr.max_luminance)
+                .map(|value| value.0 as u16);
             drop(config);
 
             let hdr_desc = hdr_allowed
@@ -2237,7 +2240,7 @@ impl Tty {
                 });
                 ConnectorColorState {
                     colorspace: Colorspace::Bt2020Rgb,
-                    hdr_metadata: Some(build_hdr_metadata(&desc, &surface.edid_hdr)),
+                    hdr_metadata: Some(build_hdr_metadata(&desc, &surface.edid_hdr, max_luminance)),
                     max_bpc,
                 }
             } else {
@@ -2267,12 +2270,12 @@ impl Tty {
                 }
             }
 
-            (blend_hdr, hdr_desc.is_some(), reference_luminance)
+            (blend_hdr, hdr_desc.is_some(), sdr_brightness)
         };
 
         // A blend-space change alters what every shader outputs without any element damage;
         // force a full redraw.
-        let blend = blend_hdr.then_some(reference_luminance);
+        let blend = blend_hdr.then_some(sdr_brightness);
         if surface.last_blend != Some(blend) {
             surface.last_blend = Some(blend);
             surface.compositor.reset_buffers();
@@ -3676,17 +3679,22 @@ fn get_edid_info(
 /// a PQ infoframe with the description's mastering display primaries (target color volume),
 /// falling back to its container primaries when the client didn't provide any.
 ///
-/// Luminance priority: what the client provided (clamped to the sink's EDID capabilities) >
-/// the sink's EDID desired-content values > conservative ~500 nit placeholders.
-fn build_hdr_metadata(desc: &ImageDescription, edid: &EdidHdrInfo) -> HdrOutputMetadata {
+/// Luminance priority: what the client provided (clamped to the configured peak or the sink's
+/// EDID capabilities) > the configured peak > the sink's EDID desired-content values >
+/// conservative ~500 nit placeholders.
+fn build_hdr_metadata(
+    desc: &ImageDescription,
+    edid: &EdidHdrInfo,
+    configured_max_luminance: Option<u16>,
+) -> HdrOutputMetadata {
     let to_u16 = |v: u32| v.min(u16::MAX as u32) as u16;
-    // Clamps a client-provided value to the sink's EDID capability, when the EDID has one.
-    let clamp_to = |v: u16, edid_cap: u16| if edid_cap > 0 { v.min(edid_cap) } else { v };
+    let sink_max_luminance = configured_max_luminance.unwrap_or(edid.max_luminance);
+    let clamp_to = |value: u16, cap: u16| if cap > 0 { value.min(cap) } else { value };
 
     let max_luminance = desc
         .mastering_luminance
-        .map(|(_, max)| clamp_to(to_u16(max), edid.max_luminance))
-        .or((edid.max_luminance > 0).then_some(edid.max_luminance))
+        .map(|(_, max)| clamp_to(to_u16(max), sink_max_luminance))
+        .or((sink_max_luminance > 0).then_some(sink_max_luminance))
         .unwrap_or(500);
     let min_luminance = desc
         .mastering_luminance
@@ -3695,14 +3703,19 @@ fn build_hdr_metadata(desc: &ImageDescription, edid: &EdidHdrInfo) -> HdrOutputM
         .unwrap_or(50);
     let max_cll = desc
         .max_cll
-        .map(|v| clamp_to(to_u16(v), edid.max_luminance))
-        .or((edid.max_luminance > 0).then_some(edid.max_luminance))
+        .map(|v| clamp_to(to_u16(v), sink_max_luminance))
+        .or((sink_max_luminance > 0).then_some(sink_max_luminance))
         .unwrap_or(500);
+    let max_fall_cap = match (edid.max_frame_avg_luminance, sink_max_luminance) {
+        (0, max) => max,
+        (max_fall, 0) => max_fall,
+        (max_fall, max) => max_fall.min(max),
+    };
     let max_fall = desc
         .max_fall
-        .map(|v| clamp_to(to_u16(v), edid.max_frame_avg_luminance))
-        .or((edid.max_frame_avg_luminance > 0).then_some(edid.max_frame_avg_luminance))
-        .unwrap_or(500);
+        .map(|v| clamp_to(to_u16(v), max_fall_cap))
+        .or((edid.max_frame_avg_luminance > 0).then_some(max_fall_cap))
+        .unwrap_or_else(|| clamp_to(500, sink_max_luminance));
 
     // ST 2086 mastering primaries: the client's target color volume, which may exceed the
     // container primaries (extended target volume). Without one, the target defaults to the
@@ -3944,14 +3957,14 @@ mod tests {
         };
 
         // No client data, no EDID data: conservative placeholders.
-        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default());
+        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default(), None);
         assert_eq!(meta.max_display_mastering_luminance, 500);
         assert_eq!(meta.min_display_mastering_luminance, 50);
         assert_eq!(meta.max_cll, 500);
         assert_eq!(meta.max_fall, 500);
 
         // No client data: EDID desired-content values win.
-        let meta = build_hdr_metadata(&pq_desc, &edid);
+        let meta = build_hdr_metadata(&pq_desc, &edid, None);
         assert_eq!(meta.max_display_mastering_luminance, 800);
         assert_eq!(meta.min_display_mastering_luminance, 100);
         assert_eq!(meta.max_cll, 800);
@@ -3964,7 +3977,7 @@ mod tests {
             max_fall: Some(300),
             ..pq_desc
         };
-        let meta = build_hdr_metadata(&desc, &edid);
+        let meta = build_hdr_metadata(&desc, &edid, None);
         assert_eq!(meta.max_display_mastering_luminance, 700);
         assert_eq!(meta.min_display_mastering_luminance, 200);
         assert_eq!(meta.max_cll, 650);
@@ -3977,11 +3990,27 @@ mod tests {
             max_fall: Some(2000),
             ..pq_desc
         };
-        let meta = build_hdr_metadata(&desc, &edid);
+        let meta = build_hdr_metadata(&desc, &edid, None);
         assert_eq!(meta.max_display_mastering_luminance, 800);
         assert_eq!(meta.min_display_mastering_luminance, 100);
         assert_eq!(meta.max_cll, 800);
         assert_eq!(meta.max_fall, 600);
+
+        // A configured peak replaces the EDID peak, even when it is higher, and caps client
+        // metadata.
+        let meta = build_hdr_metadata(&desc, &edid, Some(1000));
+        assert_eq!(meta.max_display_mastering_luminance, 1000);
+        assert_eq!(meta.min_display_mastering_luminance, 100);
+        assert_eq!(meta.max_cll, 1000);
+        assert_eq!(meta.max_fall, 600);
+
+        // A missing EDID MaxFALL keeps the conservative fallback rather than using its peak.
+        let edid_without_max_fall = EdidHdrInfo {
+            max_frame_avg_luminance: 0,
+            ..edid
+        };
+        let meta = build_hdr_metadata(&pq_desc, &edid_without_max_fall, None);
+        assert_eq!(meta.max_fall, 500);
     }
 
     #[test]
@@ -4006,7 +4035,7 @@ mod tests {
 
         // Without mastering primaries the infoframe carries the container primaries
         // (BT.2020, matching the previous hardcoded behavior).
-        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default());
+        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default(), None);
         assert_eq!(meta.display_primaries[0], CtaCoordinate::BT2020_RED);
         assert_eq!(meta.display_primaries[1], CtaCoordinate::BT2020_GREEN);
         assert_eq!(meta.display_primaries[2], CtaCoordinate::BT2020_BLUE);
@@ -4019,7 +4048,7 @@ mod tests {
             mastering_primaries: Some(p3),
             ..pq_desc
         };
-        let meta = build_hdr_metadata(&desc, &EdidHdrInfo::default());
+        let meta = build_hdr_metadata(&desc, &EdidHdrInfo::default(), None);
         // Display P3 red is (0.680, 0.320): x = 0.680 * 50000 = 34000.
         assert_eq!(
             meta.display_primaries[0],

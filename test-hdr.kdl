@@ -17,7 +17,8 @@ output "eDP-1" {
     // max-bpc 10 is implied by `hdr`; set explicitly here for clarity.
     max-bpc 10
     hdr {
-        reference-luminance 203
+        paper-white 203
+        sdr-brightness 203
     }
 }
 

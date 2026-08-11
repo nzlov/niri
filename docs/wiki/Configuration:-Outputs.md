@@ -338,9 +338,19 @@ The optional `mode` property controls when the output is in HDR:
   applications lose direct scanout on this output, and the cursor is rendered without the cursor
   plane.
 
-The optional `reference-luminance` child (in cd/m²) is the luminance that SDR white (full white in
-an SDR application) is displayed at while the output is in HDR. Defaults to 203 (the BT.2408
-reference); raise it if the SDR desktop looks too dim next to HDR content.
+The HDR luminance children are in cd/m² (nits), and accept values from 1 to 10000:
+
+- `max-luminance` overrides the peak luminance reported by the display's EDID. Niri advertises this
+  value to HDR applications and uses it as the upper bound for client HDR metadata. This does not
+  increase the display's physical brightness; use it to correct an inaccurate or missing EDID value.
+- `paper-white` sets the reference white advertised to HDR applications. It defaults to 203 (the
+  BT.2408 reference) and should not exceed `max-luminance`.
+- `sdr-brightness` sets the luminance of SDR white (full white in an SDR application) while the
+  output is in HDR. It also defaults to 203; raise it if the SDR desktop looks too dim next to HDR
+  content. It is independent from `paper-white` when both are set.
+
+The old `reference-luminance` child remains accepted for compatibility. It supplies both
+`paper-white` and `sdr-brightness` when their respective new child is unset.
 
 Screenshots and screencasts of HDR outputs are rendered in SDR; HDR application content appears
 washed out in them.
@@ -354,7 +364,9 @@ output "eDP-1" {
 // Games that only probe HDR at startup: advertise HDR upfront.
 output "DP-1" {
     hdr mode="on" {
-        reference-luminance 203
+        max-luminance 1000
+        paper-white 203
+        sdr-brightness 250
     }
 }
 ```

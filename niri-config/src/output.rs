@@ -154,10 +154,37 @@ pub struct Hdr {
     /// When HDR engages on this output.
     #[knuffel(property, str, default)]
     pub mode: HdrMode,
-    /// Luminance, in cd/m² (nits), that SDR white (the value 1.0) is mapped to while the output is
-    /// in HDR mode. Defaults to 203 cd/m² (the BT.2408 reference white) when unset.
+    /// Peak luminance of the output in cd/m² (nits). Overrides the value from the EDID when set.
+    #[knuffel(child, unwrap(argument))]
+    pub max_luminance: Option<FloatOrInt<1, 10000>>,
+    /// Reference white advertised to HDR clients, in cd/m² (nits).
+    #[knuffel(child, unwrap(argument))]
+    pub paper_white: Option<FloatOrInt<1, 10000>>,
+    /// Luminance that SDR white is mapped to while the output is in HDR, in cd/m² (nits).
+    #[knuffel(child, unwrap(argument))]
+    pub sdr_brightness: Option<FloatOrInt<1, 10000>>,
+    /// Deprecated combined paper white and SDR brightness setting.
     #[knuffel(child, unwrap(argument))]
     pub reference_luminance: Option<FloatOrInt<0, 10000>>,
+}
+
+pub const DEFAULT_HDR_PAPER_WHITE: f64 = 203.;
+pub const DEFAULT_HDR_SDR_BRIGHTNESS: f64 = 203.;
+
+impl Hdr {
+    pub fn effective_paper_white(&self) -> f64 {
+        self.paper_white
+            .map(|value| value.0)
+            .or_else(|| self.reference_luminance.map(|value| value.0))
+            .unwrap_or(DEFAULT_HDR_PAPER_WHITE)
+    }
+
+    pub fn effective_sdr_brightness(&self) -> f64 {
+        self.sdr_brightness
+            .map(|value| value.0)
+            .or_else(|| self.reference_luminance.map(|value| value.0))
+            .unwrap_or(DEFAULT_HDR_SDR_BRIGHTNESS)
+    }
 }
 
 /// When HDR engages on an `hdr`-enabled output.
@@ -588,6 +615,44 @@ mod tests {
     use insta::assert_debug_snapshot;
 
     use super::*;
+    use crate::Config;
+
+    fn parse_hdr(body: &str) -> Hdr {
+        let text = format!("output \"DP-1\" {{\nhdr {{\n{body}\n}}\n}}");
+        Config::parse_mem(&text)
+            .unwrap()
+            .outputs
+            .0
+            .remove(0)
+            .hdr
+            .unwrap()
+    }
+
+    #[test]
+    fn hdr_luminance_options_parse_and_resolve() {
+        let hdr = parse_hdr(
+            "max-luminance 1000\npaper-white 250\nsdr-brightness 300\nreference-luminance 180",
+        );
+        assert_eq!(hdr.max_luminance.unwrap().0, 1000.);
+        assert_eq!(hdr.effective_paper_white(), 250.);
+        assert_eq!(hdr.effective_sdr_brightness(), 300.);
+
+        let legacy = parse_hdr("reference-luminance 180");
+        assert_eq!(legacy.effective_paper_white(), 180.);
+        assert_eq!(legacy.effective_sdr_brightness(), 180.);
+
+        let defaults = parse_hdr("");
+        assert_eq!(defaults.effective_paper_white(), 203.);
+        assert_eq!(defaults.effective_sdr_brightness(), 203.);
+    }
+
+    #[test]
+    fn hdr_luminance_options_must_be_positive() {
+        for option in ["max-luminance", "paper-white", "sdr-brightness"] {
+            let text = format!("output \"DP-1\" {{\nhdr {{\n{option} 0\n}}\n}}");
+            assert!(Config::parse_mem(&text).is_err(), "{option} accepted zero");
+        }
+    }
 
     #[test]
     fn parse_mode() {

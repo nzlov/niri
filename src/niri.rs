@@ -2278,35 +2278,31 @@ impl Niri {
     }
 
     /// The PQ/BT.2020 image description describing an HDR output, with luminances from the
-    /// sink's EDID and the configured SDR reference white.
+    /// config or the sink's EDID.
     fn hdr_blend_description(
         hdr: &niri_config::output::Hdr,
         caps: OutputHdrCaps,
     ) -> ImageDescription {
         // Same placeholder as build_hdr_metadata() in the TTY backend uses for sinks whose
         // EDID doesn't provide luminance data.
-        let max_luminance = if caps.max_luminance > 0 {
-            u32::from(caps.max_luminance)
-        } else {
-            500
-        };
-        let reference_luminance = hdr.reference_luminance.map(|v| v.0).unwrap_or(203.) as u32;
+        let configured_max_luminance = hdr.max_luminance.map(|value| value.0 as u32);
+        let max_luminance = configured_max_luminance
+            .or((caps.max_luminance > 0).then(|| u32::from(caps.max_luminance)))
+            .unwrap_or(500);
+        let paper_white = hdr.effective_paper_white() as u32;
         ImageDescription {
             transfer: CmTransferFunction::St2084Pq,
             primaries: CmPrimariesOption {
                 named: Some(CmPrimaries::Bt2020),
                 values: None,
             },
-            max_cll: (caps.max_luminance > 0).then(|| u32::from(caps.max_luminance)),
+            max_cll: configured_max_luminance
+                .or((caps.max_luminance > 0).then(|| u32::from(caps.max_luminance))),
             max_fall: (caps.max_frame_avg_luminance > 0)
-                .then(|| u32::from(caps.max_frame_avg_luminance)),
+                .then(|| u32::from(caps.max_frame_avg_luminance).min(max_luminance)),
             mastering_luminance: None,
             mastering_primaries: None,
-            luminances: Some((
-                u32::from(caps.min_luminance),
-                max_luminance,
-                reference_luminance,
-            )),
+            luminances: Some((u32::from(caps.min_luminance), max_luminance, paper_white)),
             windows_scrgb: false,
             windows_bt2100: false,
         }
@@ -2335,8 +2331,11 @@ impl Niri {
 
     pub(crate) fn output_capture_reference_luminance(&self, output: &Output) -> f64 {
         let desc = self.output_blend_description(output);
-        desc.luminances
-            .map(|(_, _, reference)| reference as f64)
+        if !desc.is_hdr() {
+            return DEFAULT_REFERENCE_LUMINANCE;
+        }
+        self.output_hdr_config(output)
+            .map(|(hdr, _)| hdr.effective_sdr_brightness())
             .unwrap_or(DEFAULT_REFERENCE_LUMINANCE)
     }
 
