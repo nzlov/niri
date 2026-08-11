@@ -378,8 +378,8 @@ fn extended_target_volume_roundtrip() {
     // A target color volume (BT.2020 mastering primaries) exceeding the container primaries
     // (sRGB) requires the advertised extended_target_volume feature; without it, smithay
     // fails the description gracefully and set_image_description would raise a protocol
-    // error. The mastering primaries must round-trip into the engaged description, where the
-    // TTY backend forwards them as ST 2086 metadata.
+    // error. The mastering primaries must round-trip into the engaged description for rendering;
+    // connector metadata remains stable while HDR is active to avoid content-switch modesets.
     let mut f = fixture_with_hdr_mode_on();
 
     let id = f.add_client();

@@ -2195,6 +2195,9 @@ impl Tty {
         // surface carries an HDR image description (passthrough), so the output is SDR
         // otherwise.
         //
+        // Connector metadata stays fixed while HDR is active. Client metadata is still used by
+        // rendering, but must not turn an HDR-to-HDR content switch into a modeset.
+        //
         // The connector state is only *staged* here; smithay applies it inside its own commit
         // as a single atomic modeset together with mode, CRTC and plane state (committing
         // connector color properties standalone hangs some drivers, notably nvidia).
@@ -2202,11 +2205,13 @@ impl Tty {
             let config = self.config.borrow();
             let output_config = config.outputs.find(&surface.name);
             let hdr_config = output_config.and_then(|o| o.hdr.clone());
-            let hdr_allowed = hdr_config.is_some() && surface.hdr_supported;
+            let hdr_mode = hdr_config
+                .as_ref()
+                .filter(|_| surface.hdr_supported)
+                .map(|hdr| hdr.mode);
             let max_bpc = output_config
                 .map(|o| effective_max_bpc(o, &surface.max_bpc_range))
                 .unwrap_or(None);
-            let always_on = hdr_config.as_ref().is_some_and(|h| h.mode == HdrMode::On);
             let sdr_brightness = hdr_config
                 .as_ref()
                 .map(|hdr| hdr.effective_sdr_brightness())
@@ -2217,39 +2222,19 @@ impl Tty {
                 .map(|value| value.0 as u16);
             drop(config);
 
-            let hdr_desc = hdr_allowed
+            let hdr_desc = hdr_mode
+                .is_some()
                 .then(|| niri.output_hdr_image_description(output))
                 .flatten();
-            let blend_hdr = hdr_allowed && (always_on || hdr_desc.is_some());
-
-            let desired = if blend_hdr {
-                // Without fullscreen HDR content, the metadata comes from the sink's EDID.
-                let desc = hdr_desc.unwrap_or(ImageDescription {
-                    transfer: CmTransferFunction::St2084Pq,
-                    primaries: CmPrimariesOption {
-                        named: Some(CmPrimaries::Bt2020),
-                        values: None,
-                    },
-                    max_cll: None,
-                    max_fall: None,
-                    mastering_luminance: None,
-                    mastering_primaries: None,
-                    luminances: None,
-                    windows_scrgb: false,
-                    windows_bt2100: false,
-                });
-                ConnectorColorState {
-                    colorspace: Colorspace::Bt2020Rgb,
-                    hdr_metadata: Some(build_hdr_metadata(&desc, &surface.edid_hdr, max_luminance)),
-                    max_bpc,
-                }
-            } else {
-                ConnectorColorState {
-                    colorspace: Colorspace::Default,
-                    hdr_metadata: None,
-                    max_bpc,
-                }
-            };
+            let hdr_content = hdr_desc.is_some();
+            let desired = desired_connector_color_state(
+                hdr_mode,
+                hdr_content,
+                max_bpc,
+                &surface.edid_hdr,
+                max_luminance,
+            );
+            let blend_hdr = desired.hdr_metadata.is_some();
 
             if surface.compositor.pending_color_state() != desired
                 && surface.failed_color_state != Some(desired)
@@ -2270,7 +2255,7 @@ impl Tty {
                 }
             }
 
-            (blend_hdr, hdr_desc.is_some(), sdr_brightness)
+            (blend_hdr, hdr_content, sdr_brightness)
         };
 
         // A blend-space change alters what every shader outputs without any element damage;
@@ -3675,9 +3660,56 @@ fn get_edid_info(
     libdisplay_info::info::Info::parse_edid(&data).context("error parsing EDID")
 }
 
-/// Builds the HDR static metadata to signal on the connector for a client's image description:
-/// a PQ infoframe with the description's mastering display primaries (target color volume),
-/// falling back to its container primaries when the client didn't provide any.
+fn desired_connector_color_state(
+    hdr_mode: Option<HdrMode>,
+    hdr_content: bool,
+    max_bpc: Option<u32>,
+    edid: &EdidHdrInfo,
+    configured_max_luminance: Option<u16>,
+) -> ConnectorColorState {
+    let hdr_active = match hdr_mode {
+        Some(HdrMode::Auto) => hdr_content,
+        Some(HdrMode::On) => true,
+        None => false,
+    };
+
+    if !hdr_active {
+        return ConnectorColorState {
+            colorspace: Colorspace::Default,
+            hdr_metadata: None,
+            max_bpc,
+        };
+    }
+
+    let output_desc = ImageDescription {
+        transfer: CmTransferFunction::St2084Pq,
+        primaries: CmPrimariesOption {
+            named: Some(CmPrimaries::Bt2020),
+            values: None,
+        },
+        max_cll: None,
+        max_fall: None,
+        mastering_luminance: None,
+        mastering_primaries: None,
+        luminances: None,
+        windows_scrgb: false,
+        windows_bt2100: false,
+    };
+
+    ConnectorColorState {
+        colorspace: Colorspace::Bt2020Rgb,
+        hdr_metadata: Some(build_hdr_metadata(
+            &output_desc,
+            edid,
+            configured_max_luminance,
+        )),
+        max_bpc,
+    }
+}
+
+/// Builds the HDR static metadata to signal on the connector for an image description: a PQ
+/// infoframe with the description's mastering display primaries, falling back to its container
+/// primaries when the description doesn't provide any.
 ///
 /// Luminance priority: what the client provided (clamped to the configured peak or the sink's
 /// EDID capabilities) > the configured peak > the sink's EDID desired-content values >
@@ -3923,14 +3955,64 @@ unsafe fn init_libinput_plugin_system(libinput: &Libinput) {
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
-    use niri_config::output::Modeline;
+    use niri_config::output::{HdrMode, Modeline};
     use niri_ipc::{HSyncPolarity, VSyncPolarity};
 
+    use smithay::backend::drm::Colorspace;
     use smithay::wayland::color::management::ImageDescription;
 
     use crate::backend::tty::{
-        build_hdr_metadata, calculate_drm_mode_from_modeline, calculate_mode_cvt, EdidHdrInfo,
+        build_hdr_metadata, calculate_drm_mode_from_modeline, calculate_mode_cvt,
+        desired_connector_color_state, EdidHdrInfo,
     };
+
+    #[test]
+    fn connector_color_state_auto_tracks_hdr_content() {
+        let edid = EdidHdrInfo {
+            pq: true,
+            bt2020_rgb: true,
+            max_luminance: 800,
+            min_luminance: 100,
+            max_frame_avg_luminance: 600,
+        };
+
+        let sdr = desired_connector_color_state(Some(HdrMode::Auto), false, Some(10), &edid, None);
+        let hdr = desired_connector_color_state(Some(HdrMode::Auto), true, Some(10), &edid, None);
+
+        assert_eq!(sdr.colorspace, Colorspace::Default);
+        assert_eq!(sdr.hdr_metadata, None);
+        assert_eq!(hdr.colorspace, Colorspace::Bt2020Rgb);
+        assert!(hdr.hdr_metadata.is_some());
+    }
+
+    #[test]
+    fn connector_color_state_on_is_stable_across_content_changes() {
+        let edid = EdidHdrInfo {
+            max_luminance: 800,
+            min_luminance: 100,
+            max_frame_avg_luminance: 600,
+            ..Default::default()
+        };
+
+        let without_hdr_content =
+            desired_connector_color_state(Some(HdrMode::On), false, Some(10), &edid, Some(1000));
+        let with_hdr_content =
+            desired_connector_color_state(Some(HdrMode::On), true, Some(10), &edid, Some(1000));
+
+        assert_eq!(without_hdr_content, with_hdr_content);
+        assert_eq!(with_hdr_content.colorspace, Colorspace::Bt2020Rgb);
+        assert!(with_hdr_content.hdr_metadata.is_some());
+    }
+
+    #[test]
+    fn connector_color_state_stays_sdr_when_hdr_is_unavailable() {
+        let state =
+            desired_connector_color_state(None, true, Some(8), &EdidHdrInfo::default(), None);
+
+        assert_eq!(state.colorspace, Colorspace::Default);
+        assert_eq!(state.hdr_metadata, None);
+        assert_eq!(state.max_bpc, Some(8));
+    }
 
     #[test]
     fn hdr_metadata_luminance_priorities() {
