@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
-    DeviceCapability, Event, InputBackend, PointerAxisEvent, PointerButtonEvent,
+    DeviceCapability, Event, InputBackend, InputTime, PointerAxisEvent, PointerButtonEvent,
     PointerMotionAbsoluteEvent, PointerMotionEvent, UnusedEvent,
 };
 use smithay::input::pointer::AxisFrame;
@@ -22,6 +22,8 @@ use wayland_protocols_wlr::virtual_pointer::v1::server::{
 use zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
 use zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
 
+use crate::protocols::EmptyData;
+
 const VERSION: u32 = 2;
 
 pub struct VirtualPointerManagerState {
@@ -31,9 +33,6 @@ pub struct VirtualPointerManagerState {
 pub struct VirtualPointerManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
-
-/// User data of the `zwlr_virtual_pointer_manager_v1` resource.
-pub struct VirtualPointerManagerData;
 
 pub struct VirtualPointerInputBackend;
 
@@ -70,7 +69,9 @@ impl VirtualPointer {
     fn mutate_axis_frame(&self, time: Option<u32>, f: impl FnOnce(AxisFrame) -> AxisFrame) {
         let mut frame = self.data().axis_frame.lock().unwrap();
 
-        *frame = frame.or(time.map(AxisFrame::new)).map(f);
+        *frame = frame
+            .or(time.map(|time| AxisFrame::new(InputTime::from_millis(time))))
+            .map(f);
     }
 }
 
@@ -104,8 +105,8 @@ pub struct VirtualPointerMotionEvent {
 }
 
 impl Event<VirtualPointerInputBackend> for VirtualPointerMotionEvent {
-    fn time(&self) -> u64 {
-        self.time as u64 * 1000 // millis to micros
+    fn time(&self) -> InputTime {
+        InputTime::from_millis(self.time)
     }
 
     fn device(&self) -> VirtualPointer {
@@ -141,8 +142,8 @@ pub struct VirtualPointerMotionAbsoluteEvent {
 }
 
 impl Event<VirtualPointerInputBackend> for VirtualPointerMotionAbsoluteEvent {
-    fn time(&self) -> u64 {
-        self.time as u64 * 1000 // millis to micros
+    fn time(&self) -> InputTime {
+        InputTime::from_millis(self.time)
     }
 
     fn device(&self) -> VirtualPointer {
@@ -176,8 +177,8 @@ pub struct VirtualPointerButtonEvent {
 }
 
 impl Event<VirtualPointerInputBackend> for VirtualPointerButtonEvent {
-    fn time(&self) -> u64 {
-        self.time as u64 * 1000 // millis to micros
+    fn time(&self) -> InputTime {
+        InputTime::from_millis(self.time)
     }
 
     fn device(&self) -> VirtualPointer {
@@ -201,8 +202,8 @@ pub struct VirtualPointerAxisEvent {
 }
 
 impl Event<VirtualPointerInputBackend> for VirtualPointerAxisEvent {
-    fn time(&self) -> u64 {
-        self.frame.time as u64 * 1000 // millis to micros
+    fn time(&self) -> InputTime {
+        self.frame.time
     }
 
     fn device(&self) -> VirtualPointer {
@@ -293,8 +294,6 @@ impl VirtualPointerManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerGlobalData>,
-        D: Dispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData>,
-        D: Dispatch<ZwlrVirtualPointerV1, VirtualPointerUserData>,
         D: VirtualPointerHandler,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
@@ -312,9 +311,7 @@ impl VirtualPointerManagerState {
 
 impl<D> GlobalDispatch2<ZwlrVirtualPointerManagerV1, D> for VirtualPointerManagerGlobalData
 where
-    D: Dispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData>,
-    D: Dispatch<ZwlrVirtualPointerV1, VirtualPointerUserData>,
-    D: VirtualPointerHandler,
+    D: Dispatch<ZwlrVirtualPointerManagerV1, EmptyData>,
     D: 'static,
 {
     fn bind(
@@ -325,7 +322,7 @@ where
         manager: New<ZwlrVirtualPointerManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        data_init.init(manager, VirtualPointerManagerData);
+        data_init.init(manager, EmptyData);
     }
 
     fn can_view(&self, client: &Client) -> bool {
@@ -333,7 +330,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrVirtualPointerManagerV1, D> for VirtualPointerManagerData
+impl<D> Dispatch2<ZwlrVirtualPointerManagerV1, D> for EmptyData
 where
     D: Dispatch<ZwlrVirtualPointerV1, VirtualPointerUserData>,
     D: VirtualPointerHandler,
@@ -544,5 +541,3 @@ where
             .remove(resource);
     }
 }
-
-// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.

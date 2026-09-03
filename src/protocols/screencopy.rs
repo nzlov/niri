@@ -24,6 +24,7 @@ use wayland_backend::server::Credentials;
 use zwlr_screencopy_frame_v1::{Flags, ZwlrScreencopyFrameV1};
 use zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
+use crate::protocols::EmptyData;
 use crate::utils::{get_credentials_for_client, get_monotonic_time, CastSessionId, CastStreamId};
 
 const VERSION: u32 = 3;
@@ -207,15 +208,10 @@ pub struct ScreencopyManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
-/// User data of the `zwlr_screencopy_manager_v1` resource.
-pub struct ScreencopyManagerData;
-
 impl ScreencopyManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
-        D: Dispatch<ZwlrScreencopyManagerV1, ScreencopyManagerData>,
-        D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
         D: ScreencopyHandler,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
@@ -283,8 +279,7 @@ impl ScreencopyManagerState {
 
 impl<D> GlobalDispatch2<ZwlrScreencopyManagerV1, D> for ScreencopyManagerGlobalData
 where
-    D: Dispatch<ZwlrScreencopyManagerV1, ScreencopyManagerData>,
-    D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
+    D: Dispatch<ZwlrScreencopyManagerV1, EmptyData>,
     D: ScreencopyHandler,
     D: 'static,
 {
@@ -296,7 +291,7 @@ where
         manager: New<ZwlrScreencopyManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(manager, ScreencopyManagerData);
+        let manager = data_init.init(manager, EmptyData);
 
         let state = state.screencopy_state();
         let credentials = get_credentials_for_client(dh, client);
@@ -309,7 +304,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrScreencopyManagerV1, D> for ScreencopyManagerData
+impl<D> Dispatch2<ZwlrScreencopyManagerV1, D> for EmptyData
 where
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
     D: ScreencopyHandler,
@@ -481,8 +476,6 @@ pub trait ScreencopyHandler {
 
     fn screencopy_state(&mut self) -> &mut ScreencopyManagerState;
 }
-
-// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.
 
 #[derive(Clone)]
 pub struct ScreencopyFrameInfo {

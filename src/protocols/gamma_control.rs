@@ -15,6 +15,8 @@ use wayland_protocols_wlr::gamma_control::v1::server::{
 use zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1;
 use zwlr_gamma_control_v1::ZwlrGammaControlV1;
 
+use crate::protocols::EmptyData;
+
 const VERSION: u32 = 1;
 
 pub struct GammaControlManagerState {
@@ -25,9 +27,6 @@ pub struct GammaControlManagerState {
 pub struct GammaControlManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
-
-/// User data of the `zwlr_gamma_control_manager_v1` resource.
-pub struct GammaControlManagerData;
 
 pub trait GammaControlHandler {
     fn gamma_control_manager_state(&mut self) -> &mut GammaControlManagerState;
@@ -43,8 +42,6 @@ impl GammaControlManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrGammaControlManagerV1, GammaControlManagerGlobalData>,
-        D: Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData>,
-        D: Dispatch<ZwlrGammaControlV1, GammaControlState>,
         D: GammaControlHandler,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
@@ -68,8 +65,7 @@ impl GammaControlManagerState {
 
 impl<D> GlobalDispatch2<ZwlrGammaControlManagerV1, D> for GammaControlManagerGlobalData
 where
-    D: Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData>,
-    D: Dispatch<ZwlrGammaControlV1, GammaControlState>,
+    D: Dispatch<ZwlrGammaControlManagerV1, EmptyData>,
     D: GammaControlHandler,
     D: 'static,
 {
@@ -81,7 +77,7 @@ where
         manager: New<ZwlrGammaControlManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        data_init.init(manager, GammaControlManagerData);
+        data_init.init(manager, EmptyData);
     }
 
     fn can_view(&self, client: &Client) -> bool {
@@ -89,7 +85,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrGammaControlManagerV1, D> for GammaControlManagerData
+impl<D> Dispatch2<ZwlrGammaControlManagerV1, D> for EmptyData
 where
     D: Dispatch<ZwlrGammaControlV1, GammaControlState>,
     D: GammaControlHandler,
@@ -221,6 +217,3 @@ where
         let _ = state.set_gamma(&output, None);
     }
 }
-
-// Dispatch is delegated via the single `delegate_dispatch2!(State)` invocation; the per-protocol
-// `delegate_gamma_control!` macro is no longer needed with smithay's unified dispatch model.

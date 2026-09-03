@@ -13,10 +13,9 @@ use std::time::Duration;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
-use smithay::delegate_dispatch2;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
-use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus, PointerHandle};
+use smithay::input::pointer::{self, CursorIcon, CursorImageStatus, Focus, PointerHandle};
 use smithay::input::tablet::TabletSeatHandler;
 use smithay::input::{keyboard, Seat, SeatHandler, SeatState};
 use smithay::output::Output;
@@ -39,7 +38,9 @@ use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
 };
 use smithay::wayland::output::OutputHandler;
-use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsHandler};
+use smithay::wayland::pointer_constraints::{
+    with_pointer_constraint, ConstraintRemove, PointerConstraintsHandler,
+};
 use smithay::wayland::security_context::{
     SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
 };
@@ -64,8 +65,9 @@ use smithay::wayland::xdg_activation::{
 };
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
+use crate::input::click_grab::ClickGrab;
 use crate::layout::workspace::WorkspaceId;
-use crate::layout::ActivateWindow;
+use crate::layout::{ActivateWindow, LayoutElement};
 use crate::niri::{DndIcon, NewClient, State};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
@@ -86,11 +88,6 @@ use crate::protocols::virtual_pointer::{
     VirtualPointerMotionEvent,
 };
 use crate::utils::{output_size, send_scale_transform};
-
-// Smithay replaced the per-protocol `delegate_*!` macros with a single blanket-impl macro that
-// wires every `Dispatch2`/`GlobalDispatch2` user-data type (both smithay's and niri's custom
-// protocols) into `State`'s `Dispatch`/`GlobalDispatch`.
-delegate_dispatch2!(State);
 
 pub const XDG_ACTIVATION_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -133,6 +130,13 @@ impl SeatHandler for State {
             keyboard.led_update(led_state.into());
         }
     }
+
+    fn click_grab(
+        &mut self,
+        start_data: pointer::GrabStartData<Self>,
+    ) -> impl pointer::PointerGrab<Self> {
+        ClickGrab::new(start_data)
+    }
 }
 
 impl TabletSeatHandler for State {
@@ -147,11 +151,6 @@ impl TabletSeatHandler for State {
 }
 
 impl PointerConstraintsHandler for State {
-    fn remove_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
-        // Constraints are re-evaluated on the next pointer motion via `with_pointer_constraint`,
-        // so nothing extra is needed when one is removed.
-    }
-
     fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
         // Pointer constraints track pointer focus internally, so make sure it's up to date before
         // activating a new one.
@@ -205,6 +204,38 @@ impl PointerConstraintsHandler for State {
                 output_geometry.size -= (1, 1).into();
                 (origin + location).constrain(output_geometry.to_f64())
             });
+        self.niri.pointer_constraint_position_hint = Some(target);
+    }
+
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        pointer: &PointerHandle<Self>,
+        constraint_remove: ConstraintRemove,
+    ) {
+        // Since a pointer constraint is broken when a surface loses pointer focus, and one surface
+        // can only have a single pointer constraint at once, assume there can be only one
+        // constraint active at once, and therefore the global position hint should come from that
+        // one constraint that just got removed.
+        let Some(target) = self.niri.pointer_constraint_position_hint.take() else {
+            // The client never sent a position hint.
+            return;
+        };
+
+        if matches!(constraint_remove, ConstraintRemove::PointerLeave(_)) {
+            return;
+        }
+
+        // If the constraint was broken by the pointer forcibly leaving the surface (e.g. the user
+        // opened the overview), then it doesn't make much sense to warp it.
+        //
+        // Furthermore, when the constraint is removed as part of the pointer leaving the surface,
+        // this call happens with locked pointer data, and calling set_location() will try to lock
+        // it again and deadlock.
+        if pointer.last_enter().is_none() {
+            return;
+        }
+
         pointer.set_location(target);
 
         // Redraw to update the cursor position if it's visible.
@@ -736,7 +767,6 @@ impl GammaControlHandler for State {
         }
     }
 }
-
 impl ColorManagementHandler for State {
     fn color_management_state(&mut self) -> &mut ColorManagementState {
         &mut self.niri.color_management_state
@@ -824,13 +854,27 @@ impl XdgActivationHandler for State {
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();
-                if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
-                    mapped.set_urgent(true);
-                    self.niri.queue_redraw_all();
-                } else {
-                    self.niri.layout.activate_window(&window);
-                    self.niri.layer_shell_on_demand_focus = None;
-                    self.niri.queue_redraw_all();
+                match mapped.rules().on_xdg_activate {
+                    Some(niri_config::OnXdgActivate::Ignore) => {}
+                    Some(niri_config::OnXdgActivate::SetUrgent) => {
+                        mapped.set_urgent(true);
+                        self.niri.queue_redraw_all();
+                    }
+                    Some(niri_config::OnXdgActivate::Focus) => {
+                        self.niri.layout.activate_window(&window);
+                        self.niri.layer_shell_on_demand_focus = None;
+                        self.niri.queue_redraw_all();
+                    }
+                    None => {
+                        if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
+                            mapped.set_urgent(true);
+                            self.niri.queue_redraw_all();
+                        } else {
+                            self.niri.layout.activate_window(&window);
+                            self.niri.layer_shell_on_demand_focus = None;
+                            self.niri.queue_redraw_all();
+                        }
+                    }
                 }
             } else if let Some(unmapped) = self.niri.unmapped_windows.get_mut(&surface) {
                 unmapped.activation_token_data = Some(token_data);

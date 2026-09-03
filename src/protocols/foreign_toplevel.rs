@@ -25,6 +25,7 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::{Dispatch2, GlobalDispatch2};
 
 use crate::niri::State;
+use crate::protocols::EmptyData;
 use crate::utils::with_toplevel_role_and_current;
 use crate::window::mapped::MappedId;
 
@@ -65,16 +66,11 @@ pub struct ForeignToplevelGlobalData {
     filter: Arc<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
-/// User data shared by the ext/wlr foreign-toplevel manager, list, and handle resources.
-pub struct ForeignToplevelManagerData;
-
 impl ForeignToplevelManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
         D: GlobalDispatch<ExtForeignToplevelListV1, ForeignToplevelGlobalData>,
-        D: Dispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData>,
-        D: Dispatch<ExtForeignToplevelListV1, ForeignToplevelManagerData>,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
@@ -329,14 +325,14 @@ impl ToplevelData {
         client: &Client,
         manager: &ExtForeignToplevelListV1,
     ) where
-        D: Dispatch<ExtForeignToplevelHandleV1, ForeignToplevelManagerData>,
+        D: Dispatch<ExtForeignToplevelHandleV1, EmptyData>,
         D: 'static,
     {
         let toplevel = client
             .create_resource::<ExtForeignToplevelHandleV1, _, D>(
                 handle,
                 manager.version(),
-                ForeignToplevelManagerData,
+                EmptyData,
             )
             .unwrap();
         manager.toplevel(&toplevel);
@@ -361,14 +357,14 @@ impl ToplevelData {
         client: &Client,
         manager: &ZwlrForeignToplevelManagerV1,
     ) where
-        D: Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelManagerData>,
+        D: Dispatch<ZwlrForeignToplevelHandleV1, EmptyData>,
         D: 'static,
     {
         let toplevel = client
             .create_resource::<ZwlrForeignToplevelHandleV1, _, D>(
                 handle,
                 manager.version(),
-                ForeignToplevelManagerData,
+                EmptyData,
             )
             .unwrap();
         manager.toplevel(&toplevel);
@@ -398,8 +394,8 @@ impl ToplevelData {
 
 impl<D> GlobalDispatch2<ExtForeignToplevelListV1, D> for ForeignToplevelGlobalData
 where
-    D: Dispatch<ExtForeignToplevelListV1, ForeignToplevelManagerData>,
-    D: Dispatch<ExtForeignToplevelHandleV1, ForeignToplevelManagerData>,
+    D: Dispatch<ExtForeignToplevelListV1, EmptyData>,
+    D: Dispatch<ExtForeignToplevelHandleV1, EmptyData>,
     D: ForeignToplevelHandler,
 {
     fn bind(
@@ -410,7 +406,7 @@ where
         resource: New<ExtForeignToplevelListV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ForeignToplevelManagerData);
+        let manager = data_init.init(resource, EmptyData);
 
         let state = state.foreign_toplevel_manager_state();
 
@@ -426,7 +422,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ExtForeignToplevelListV1, D> for ForeignToplevelManagerData
+impl<D> Dispatch2<ExtForeignToplevelListV1, D> for EmptyData
 where
     D: ForeignToplevelHandler,
 {
@@ -459,7 +455,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ExtForeignToplevelHandleV1, D> for ForeignToplevelManagerData
+impl<D> Dispatch2<ExtForeignToplevelHandleV1, D> for EmptyData
 where
     D: ForeignToplevelHandler,
 {
@@ -488,8 +484,8 @@ where
 
 impl<D> GlobalDispatch2<ZwlrForeignToplevelManagerV1, D> for ForeignToplevelGlobalData
 where
-    D: Dispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData>,
-    D: Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelManagerData>,
+    D: Dispatch<ZwlrForeignToplevelManagerV1, EmptyData>,
+    D: Dispatch<ZwlrForeignToplevelHandleV1, EmptyData>,
     D: ForeignToplevelHandler,
 {
     fn bind(
@@ -500,7 +496,7 @@ where
         resource: New<ZwlrForeignToplevelManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ForeignToplevelManagerData);
+        let manager = data_init.init(resource, EmptyData);
 
         let state = state.foreign_toplevel_manager_state();
 
@@ -516,7 +512,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrForeignToplevelManagerV1, D> for ForeignToplevelManagerData
+impl<D> Dispatch2<ZwlrForeignToplevelManagerV1, D> for EmptyData
 where
     D: ForeignToplevelHandler,
 {
@@ -548,7 +544,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrForeignToplevelHandleV1, D> for ForeignToplevelManagerData
+impl<D> Dispatch2<ZwlrForeignToplevelHandleV1, D> for EmptyData
 where
     D: ForeignToplevelHandler,
 {
@@ -628,5 +624,3 @@ fn to_state_vec(states: &ToplevelStateSet, has_focus: bool) -> ArrayVec<u32, 3> 
 
     rv
 }
-
-// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.

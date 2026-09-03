@@ -23,6 +23,7 @@ use zwlr_output_mode_v1::ZwlrOutputModeV1;
 
 use crate::backend::OutputId;
 use crate::niri::State;
+use crate::protocols::EmptyData;
 use crate::utils::ipc_transform_to_smithay;
 
 const VERSION: u32 = 4;
@@ -46,17 +47,13 @@ pub struct OutputManagementManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
-/// User data of the `zwlr_output_manager_v1` and `zwlr_output_mode_v1` resources.
-pub struct OutputManagementData;
-
-/// User data of the `zwlr_output_configuration_v1` resource.
-///
-/// Stores the manager serial the configuration was created with.
-pub struct OutputConfigurationData(u32);
-
 pub trait OutputManagementHandler {
     fn output_management_state(&mut self) -> &mut OutputManagementManagerState;
     fn apply_output_config(&mut self, config: niri_config::Outputs);
+}
+
+struct OutputConfigurationData {
+    serial: u32,
 }
 
 #[derive(Debug)]
@@ -74,11 +71,6 @@ impl OutputManagementManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrOutputManagerV1, OutputManagementManagerGlobalData>,
-        D: Dispatch<ZwlrOutputManagerV1, OutputManagementData>,
-        D: Dispatch<ZwlrOutputHeadV1, OutputId>,
-        D: Dispatch<ZwlrOutputConfigurationV1, OutputConfigurationData>,
-        D: Dispatch<ZwlrOutputConfigurationHeadV1, OutputConfigurationHeadState>,
-        D: Dispatch<ZwlrOutputModeV1, OutputManagementData>,
         D: OutputManagementHandler,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
@@ -145,7 +137,7 @@ impl OutputManagementManagerState {
                                             .create_resource::<ZwlrOutputModeV1, _, State>(
                                                 &self.display,
                                                 head.version(),
-                                                OutputManagementData,
+                                                EmptyData,
                                             )
                                             .unwrap();
                                         head.mode(&new_mode);
@@ -280,9 +272,9 @@ impl OutputManagementManagerState {
 
 impl<D> GlobalDispatch2<ZwlrOutputManagerV1, D> for OutputManagementManagerGlobalData
 where
-    D: Dispatch<ZwlrOutputManagerV1, OutputManagementData>,
+    D: Dispatch<ZwlrOutputManagerV1, EmptyData>,
+    D: Dispatch<ZwlrOutputModeV1, EmptyData>,
     D: Dispatch<ZwlrOutputHeadV1, OutputId>,
-    D: Dispatch<ZwlrOutputModeV1, OutputManagementData>,
     D: OutputManagementHandler,
     D: 'static,
 {
@@ -294,7 +286,7 @@ where
         manager: New<ZwlrOutputManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(manager, OutputManagementData);
+        let manager = data_init.init(manager, EmptyData);
         let g_state = state.output_management_state();
         let mut client_data = ClientData {
             heads: HashMap::new(),
@@ -313,7 +305,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrOutputManagerV1, D> for OutputManagementData
+impl<D> Dispatch2<ZwlrOutputManagerV1, D> for EmptyData
 where
     D: Dispatch<ZwlrOutputConfigurationV1, OutputConfigurationData>,
     D: OutputManagementHandler,
@@ -331,7 +323,7 @@ where
         match request {
             zwlr_output_manager_v1::Request::CreateConfiguration { id, serial } => {
                 let g_state = state.output_management_state();
-                let conf = data_init.init(id, OutputConfigurationData(serial));
+                let conf = data_init.init(id, OutputConfigurationData { serial });
                 if let Some(client_data) = g_state.clients.get_mut(&client.id()) {
                     if serial != g_state.serial {
                         conf.cancelled();
@@ -371,7 +363,7 @@ where
         data_init: &mut DataInit<'_, D>,
     ) {
         let g_state = state.output_management_state();
-        let outdated = self.0 != g_state.serial;
+        let outdated = self.serial != g_state.serial;
         if outdated {
             debug!("OutputConfiguration: request from an outdated configuration");
         }
@@ -583,11 +575,12 @@ where
             warn!("ConfigurationHead: request sent to a cancelled head");
             return;
         };
-        let Some(serial) = conf.data::<OutputConfigurationData>() else {
+        let Some(OutputConfigurationData { serial }) = conf.data::<OutputConfigurationData>()
+        else {
             error!("ConfigurationHead: missing serial");
             return;
         };
-        if serial.0 != g_state.serial {
+        if *serial != g_state.serial {
             warn!("ConfigurationHead: request sent to an outdated");
             return;
         }
@@ -754,7 +747,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ZwlrOutputModeV1, D> for OutputManagementData
+impl<D> Dispatch2<ZwlrOutputModeV1, D> for EmptyData
 where
     D: OutputManagementHandler,
     D: 'static,
@@ -774,8 +767,6 @@ where
         }
     }
 }
-
-// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.
 
 fn notify_removed_head(clients: &mut HashMap<ClientId, ClientData>, head: &OutputId) {
     for data in clients.values_mut() {
@@ -807,10 +798,10 @@ fn send_new_head<D>(
     output: OutputId,
     conf: &niri_ipc::Output,
 ) where
-    D: Dispatch<ZwlrOutputModeV1, OutputManagementData>,
+    D: Dispatch<ZwlrOutputModeV1, EmptyData>,
+    D: Dispatch<ZwlrOutputHeadV1, OutputId>,
     D: OutputManagementHandler,
     D: 'static,
-    D: Dispatch<ZwlrOutputHeadV1, OutputId>,
 {
     let new_head = client
         .create_resource::<ZwlrOutputHeadV1, _, D>(display, client_data.manager.version(), output)
@@ -827,11 +818,7 @@ fn send_new_head<D>(
     let mut new_modes = Vec::with_capacity(conf.modes.len());
     for (index, mode) in conf.modes.iter().enumerate() {
         let new_mode = client
-            .create_resource::<ZwlrOutputModeV1, _, D>(
-                display,
-                new_head.version(),
-                OutputManagementData,
-            )
+            .create_resource::<ZwlrOutputModeV1, _, D>(display, new_head.version(), EmptyData)
             .unwrap();
         new_head.mode(&new_mode);
         new_mode.size(i32::from(mode.width), i32::from(mode.height));

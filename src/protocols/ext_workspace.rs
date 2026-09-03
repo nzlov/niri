@@ -32,6 +32,7 @@ use wayland_backend::server::ClientId;
 use crate::layout::monitor::Monitor;
 use crate::layout::workspace::{Workspace, WorkspaceId};
 use crate::niri::State;
+use crate::protocols::EmptyData;
 use crate::window::Mapped;
 
 const VERSION: u32 = 1;
@@ -68,6 +69,10 @@ struct ExtWorkspaceGroupData {
     instances: Vec<ExtWorkspaceGroupHandleV1>,
 }
 
+// Wrapper struct for trait coherence.
+#[derive(PartialEq, Eq)]
+struct WrappedManager(ExtWorkspaceManagerV1);
+
 struct ExtWorkspaceData {
     // id cannot change once set.
     id: Option<String>,
@@ -80,22 +85,6 @@ struct ExtWorkspaceData {
 
 pub struct ExtWorkspaceGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
-}
-
-/// User data of the `ext_workspace_manager_v1` resource.
-pub struct ExtWorkspaceManagerData;
-
-/// User data of the `ext_workspace_handle_v1` and `ext_workspace_group_handle_v1` resources: the
-/// manager instance that created the handle.
-///
-/// We cannot use the bare `ExtWorkspaceManagerV1` resource as user data anymore, because with the
-/// unified dispatch model the user data type itself must implement `Dispatch2`, and the orphan rule
-/// forbids implementing the foreign `Dispatch2` trait for the foreign `ExtWorkspaceManagerV1` type.
-pub struct ExtWorkspaceManagerRef(ExtWorkspaceManagerV1);
-
-/// Returns the manager instance that created the given workspace/group handle resource.
-fn manager_of<R: Resource>(res: &R) -> Option<&ExtWorkspaceManagerV1> {
-    res.data::<ExtWorkspaceManagerRef>().map(|d| &d.0)
 }
 
 pub fn refresh(state: &mut State) {
@@ -130,11 +119,11 @@ pub fn refresh(state: &mut State) {
 
         for group in &data.instances {
             // Send workspace_leave for all workspaces in this group with matching manager.
-            let manager = manager_of(group).unwrap();
+            let manager: &WrappedManager = group.data().unwrap();
             for ws in protocol_state.workspaces.values() {
                 if ws.output.as_ref() == Some(output) {
                     for workspace in &ws.instances {
-                        if manager_of(workspace) == Some(manager) {
+                        if workspace.data() == Some(manager) {
                             group.workspace_leave(workspace);
                         }
                     }
@@ -216,13 +205,13 @@ fn refresh_workspace_group(protocol_state: &mut ExtWorkspaceManagerState, output
 
     // Send workspace_enter for all existing workspaces on this output.
     for group in &data.instances {
-        let manager = manager_of(group).unwrap();
+        let manager: &WrappedManager = group.data().unwrap();
         for ws in protocol_state.workspaces.values() {
             if ws.output.as_ref() != Some(output) {
                 continue;
             }
             for workspace in &ws.instances {
-                if manager_of(workspace) == Some(manager) {
+                if workspace.data() == Some(manager) {
                     group.workspace_enter(workspace);
                 }
             }
@@ -241,9 +230,9 @@ fn send_workspace_enter_leave(
     if let Some(output) = &data.output {
         if let Some(group_data) = workspace_groups.get(output) {
             for group in &group_data.instances {
-                let manager = manager_of(group).unwrap();
+                let manager: &WrappedManager = group.data().unwrap();
                 for workspace in &data.instances {
-                    if manager_of(workspace) == Some(manager) {
+                    if workspace.data() == Some(manager) {
                         if enter {
                             group.workspace_enter(workspace);
                         } else {
@@ -424,14 +413,14 @@ impl ExtWorkspaceGroupData {
         output: &Output,
     ) -> &ExtWorkspaceGroupHandleV1
     where
-        D: Dispatch<ExtWorkspaceGroupHandleV1, ExtWorkspaceManagerRef>,
+        D: Dispatch<ExtWorkspaceGroupHandleV1, WrappedManager>,
         D: 'static,
     {
         let group = client
             .create_resource::<ExtWorkspaceGroupHandleV1, _, D>(
                 handle,
                 manager.version(),
-                ExtWorkspaceManagerRef(manager.clone()),
+                WrappedManager(manager.clone()),
             )
             .unwrap();
         manager.workspace_group(&group);
@@ -455,14 +444,14 @@ impl ExtWorkspaceData {
         manager: &ExtWorkspaceManagerV1,
     ) -> &ExtWorkspaceHandleV1
     where
-        D: Dispatch<ExtWorkspaceHandleV1, ExtWorkspaceManagerRef>,
+        D: Dispatch<ExtWorkspaceHandleV1, WrappedManager>,
         D: 'static,
     {
         let workspace = client
             .create_resource::<ExtWorkspaceHandleV1, _, D>(
                 handle,
                 manager.version(),
-                ExtWorkspaceManagerRef(manager.clone()),
+                WrappedManager(manager.clone()),
             )
             .unwrap();
         manager.workspace(&workspace);
@@ -493,7 +482,6 @@ impl ExtWorkspaceManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ExtWorkspaceManagerV1, ExtWorkspaceGlobalData>,
-        D: Dispatch<ExtWorkspaceManagerV1, ExtWorkspaceManagerData>,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
@@ -512,8 +500,8 @@ impl ExtWorkspaceManagerState {
 
 impl<D> GlobalDispatch2<ExtWorkspaceManagerV1, D> for ExtWorkspaceGlobalData
 where
-    D: Dispatch<ExtWorkspaceManagerV1, ExtWorkspaceManagerData>,
-    D: Dispatch<ExtWorkspaceHandleV1, ExtWorkspaceManagerRef>,
+    D: Dispatch<ExtWorkspaceManagerV1, EmptyData>,
+    D: Dispatch<ExtWorkspaceHandleV1, WrappedManager>,
     D: ExtWorkspaceHandler,
 {
     fn bind(
@@ -524,7 +512,7 @@ where
         resource: New<ExtWorkspaceManagerV1>,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ExtWorkspaceManagerData);
+        let manager = data_init.init(resource, EmptyData);
 
         let state = state.ext_workspace_manager_state();
 
@@ -557,7 +545,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ExtWorkspaceManagerV1, D> for ExtWorkspaceManagerData
+impl<D> Dispatch2<ExtWorkspaceManagerV1, D> for EmptyData
 where
     D: ExtWorkspaceHandler,
 {
@@ -595,14 +583,16 @@ where
                 let state = state.ext_workspace_manager_state();
                 state.instances.retain(|x, _| x != resource);
 
+                let manager = WrappedManager(resource.clone());
+
                 for data in state.workspace_groups.values_mut() {
                     data.instances
-                        .retain(|instance| manager_of(instance) != Some(resource));
+                        .retain(|instance| instance.data() != Some(&manager));
                 }
 
                 for data in state.workspaces.values_mut() {
                     data.instances
-                        .retain(|instance| manager_of(instance) != Some(resource));
+                        .retain(|instance| instance.data() != Some(&manager));
                 }
             }
             _ => unreachable!(),
@@ -615,7 +605,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ExtWorkspaceHandleV1, D> for ExtWorkspaceManagerRef
+impl<D> Dispatch2<ExtWorkspaceHandleV1, D> for WrappedManager
 where
     D: ExtWorkspaceHandler,
 {
@@ -670,7 +660,7 @@ where
     }
 }
 
-impl<D> Dispatch2<ExtWorkspaceGroupHandleV1, D> for ExtWorkspaceManagerRef
+impl<D> Dispatch2<ExtWorkspaceGroupHandleV1, D> for WrappedManager
 where
     D: ExtWorkspaceHandler,
 {
@@ -697,5 +687,3 @@ where
         }
     }
 }
-
-// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.
