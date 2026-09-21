@@ -114,7 +114,8 @@ impl XdgShellHandler for State {
 
         // See if this comes from a tablet tool grab.
         let mut tablet_tool = None;
-        for tool in self.niri.seat.tablet_seat().get_tools().values() {
+        let tools = self.niri.seat.tablet_seat().get_tools();
+        for tool in tools.values() {
             let found = tool.with_grab(|grab_serial, grab| {
                 if grab_serial == serial {
                     let start_data = grab.start_data();
@@ -218,7 +219,8 @@ impl XdgShellHandler for State {
 
         // See if this comes from a tablet tool grab.
         let mut tablet_tool = None;
-        'outer: for tool in self.niri.seat.tablet_seat().get_tools().values() {
+        let tools = self.niri.seat.tablet_seat().get_tools();
+        'outer: for tool in tools.values() {
             if tool.has_grab(serial) {
                 if let Some(start_data) = tool.grab_start_data() {
                     if let Some((focus, _)) = &start_data.focus {

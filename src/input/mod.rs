@@ -417,7 +417,7 @@ impl State {
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
         let serial = SERIAL_COUNTER.next_serial();
-        let time = event.time();
+        let time = Event::time(&event);
         let pressed = event.state() == KeyState::Pressed;
 
         // Stop bind key repeat on any release. This won't work 100% correctly in cases like:
@@ -3568,7 +3568,7 @@ impl State {
             }
         }
 
-        if source == AxisSource::Finger {
+        if source == AxisSource::Finger || source == AxisSource::Continuous {
             if event.amount(Axis::Horizontal) == Some(0.0) {
                 frame = frame.stop(Axis::Horizontal);
             }
@@ -3585,7 +3585,17 @@ impl State {
     where
         I::Device: 'static, // Needed for downcasting.
     {
-        let Some(pos) = self.compute_tablet_position(&event) else {
+        self.update_tablet_tool::<I>(&event, true);
+    }
+
+    fn update_tablet_tool<I: InputBackend>(
+        &mut self,
+        event: &(impl Event<I> + TabletToolEvent<I>),
+        send_frame: bool,
+    ) where
+        I::Device: 'static,
+    {
+        let Some(pos) = self.compute_tablet_position(event) else {
             return;
         };
 
@@ -3623,7 +3633,6 @@ impl State {
                     .wheel_has_changed()
                     .then(|| (event.wheel_delta(), event.wheel_delta_discrete())),
             };
-            tool.axis(self, frame);
             tool.motion(
                 self,
                 under.surface,
@@ -3633,7 +3642,12 @@ impl State {
                     time,
                 },
             );
-            tool.frame(self, time);
+            // Set axis after motion to ensure it reaches the new focus surface.
+            tool.axis(self, frame);
+
+            if send_frame {
+                tool.frame(self, time);
+            }
 
             self.niri.pointer_visibility = PointerVisibility::Visible;
             self.niri.tablet_cursor_location = Some(pos);
@@ -3644,13 +3658,21 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
-    fn on_tablet_tool_tip<I: InputBackend>(&mut self, event: I::TabletToolTipEvent) {
+    fn on_tablet_tool_tip<I: InputBackend>(&mut self, event: I::TabletToolTipEvent)
+    where
+        I::Device: 'static,
+    {
         let tool = self.niri.seat.tablet_seat().get_tool(&event.tool());
 
         let Some(tool) = tool else {
             return;
         };
+
         let tip_state = event.tip_state();
+        if tip_state == TabletToolTipState::Down {
+            // Tip events can come together with axis event data with no separate axis event.
+            self.update_tablet_tool::<I>(&event, false);
+        }
 
         let serial = SERIAL_COUNTER.next_serial();
         let time = event.time();
@@ -3784,6 +3806,8 @@ impl State {
                 }
 
                 tool.up(self, &tablet::tool::UpEvent { serial, time });
+
+                self.update_tablet_tool::<I>(&event, false);
             }
         }
 
@@ -4153,12 +4177,29 @@ impl State {
             pointer.frame(self);
         }
 
+        let input_sensitivity = self
+            .niri
+            .config
+            .borrow()
+            .input
+            .touchpad
+            .pinch_sensitivity
+            .map(|x| x.0)
+            .unwrap_or(1.);
+        let window_sensitivity = pointer
+            .current_focus()
+            .map(|focused| self.niri.find_root_shell_surface(&focused))
+            .and_then(|root| self.niri.layout.find_window_and_output(&root).unzip().0)
+            .and_then(|window| window.rules().pinch_sensitivity)
+            .unwrap_or(1.);
+        let sensitivity = input_sensitivity * window_sensitivity;
+
         pointer.gesture_pinch_update(
             self,
             &GesturePinchUpdateEvent {
                 time: event.time(),
                 delta: event.delta(),
-                scale: event.scale(),
+                scale: event.scale().powf(sensitivity),
                 rotation: event.rotation(),
             },
         );
@@ -4773,8 +4814,7 @@ fn should_reset_pointer_inactivity_timer<I: InputBackend>(event: &InputEvent<I>)
 fn allowed_when_locked(action: &Action) -> bool {
     matches!(
         action,
-        Action::Quit(_)
-            | Action::ChangeVt(_)
+        Action::ChangeVt(_)
             | Action::Suspend
             | Action::PowerOffMonitors
             | Action::PowerOnMonitors

@@ -70,7 +70,7 @@ impl VirtualPointer {
         let mut frame = self.data().axis_frame.lock().unwrap();
 
         *frame = frame
-            .or(time.map(|time| AxisFrame::new(InputTime::from_millis(time))))
+            .or(time.map(InputTime::from_millis).map(AxisFrame::new))
             .map(f);
     }
 }
@@ -516,7 +516,9 @@ where
                     }
                 };
                 pointer.mutate_axis_frame(Some(time), |frame| {
-                    frame.value(axis, value).v120(axis, discrete * 120)
+                    frame
+                        .value(axis, value)
+                        .v120(axis, discrete.saturating_mul(120))
                 });
             }
             zwlr_virtual_pointer_v1::Request::Destroy => {}
