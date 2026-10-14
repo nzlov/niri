@@ -154,7 +154,7 @@ impl State {
             CastTarget::Nothing => {
                 self.backend.with_primary_renderer(|renderer| {
                     if cast.dequeue_buffer_and_clear(renderer) {
-                        cast.last_frame_time = get_monotonic_time();
+                        cast.record_frame_time(get_monotonic_time());
                     }
                 });
                 return;
@@ -245,7 +245,7 @@ impl State {
                     scale,
                     reference_luminance,
                 ) {
-                    cast.last_frame_time = get_monotonic_time();
+                    cast.record_frame_time(get_monotonic_time());
                 }
             });
 
@@ -621,7 +621,7 @@ impl Niri {
                 scale,
                 reference_luminance,
             ) {
-                cast.last_frame_time = target_presentation_time;
+                cast.record_frame_time(target_presentation_time);
             }
         }
         self.casting.casts = casts;
@@ -714,7 +714,7 @@ impl Niri {
                 scale,
                 reference_luminance,
             ) {
-                cast.last_frame_time = target_presentation_time;
+                cast.record_frame_time(target_presentation_time);
             }
         }
         self.casting.casts = casts;

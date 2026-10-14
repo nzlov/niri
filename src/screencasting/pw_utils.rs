@@ -50,7 +50,6 @@ use smithay::reexports::rustix::fd::OwnedFd;
 use smithay::reexports::rustix::fs::{
     fcntl_add_seals, ftruncate, memfd_create, MemfdFlags, SealFlags,
 };
-use smithay::reexports::rustix::mm::{mmap, munmap, MapFlags, ProtFlags};
 use smithay::utils::{DeviceFd, Logical, Physical, Point, Scale, Size, Transform};
 use zbus::object_server::SignalEmitter;
 
@@ -63,6 +62,9 @@ use crate::render_helpers::{
 };
 use crate::screencasting::CastRenderElement;
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
+
+mod shm_mapping;
+use shm_mapping::ShmMapping;
 
 // Give a 0.1 ms allowance for presentation time errors.
 const CAST_DELAY_ALLOWANCE: Duration = Duration::from_micros(100);
@@ -105,7 +107,8 @@ pub struct Cast {
     formats: FormatSet,
     offer_alpha: bool,
     cursor_mode: CursorMode,
-    pub last_frame_time: Duration,
+    last_frame_time: Duration,
+    last_frame_interval: Duration,
     scheduled_redraw: Option<RegistrationToken>,
     // Incremented once per successful frame, stored in buffer meta.
     sequence_counter: u64,
@@ -945,6 +948,7 @@ impl PipeWire {
             offer_alpha: alpha,
             cursor_mode,
             last_frame_time: Duration::ZERO,
+            last_frame_interval: Duration::ZERO,
             scheduled_redraw: None,
             sequence_counter: 0,
             inner,
@@ -1016,6 +1020,25 @@ impl Cast {
             .context("error updating stream params")?;
 
         Ok(())
+    }
+
+    pub fn record_frame_time(&mut self, recorded: Duration) {
+        let interval = self.inner.borrow().min_time_between_frames;
+        let ideal = self.last_frame_time + interval;
+
+        // Absorb small (< 1 frame) differences in output refresh interval vs. screencast framerate
+        // to keep the screencast time base consistent instead of shifting forward every frame.
+        //
+        // After a missed interval or a rate change, restart instead of catching up in a burst.
+        self.last_frame_time = if self.last_frame_interval == interval
+            && recorded >= self.last_frame_time
+            && recorded < ideal + interval
+        {
+            ideal
+        } else {
+            recorded
+        };
+        self.last_frame_interval = interval;
     }
 
     fn compute_extra_delay(&self, target_frame_time: Duration) -> Duration {
@@ -1301,7 +1324,7 @@ impl Cast {
                     .map(|x| (x, SharingBuf::Dma))
                 }
                 x if x == DataType::MemFd.as_raw() => {
-                    let shmbuf = inner_.shmbufs[&fd].clone();
+                    let shmbuf = &inner_.shmbufs[&fd];
 
                     let fourcc = if alpha {
                         Fourcc::Argb8888
@@ -1312,13 +1335,13 @@ impl Cast {
                     render_to_shmbuf(
                         renderer,
                         damage_tracker,
-                        &shmbuf,
+                        shmbuf,
                         fourcc,
                         elements,
                         states,
                         reference_luminance,
                     )
-                    .map(|()| (SyncPoint::signaled(), SharingBuf::Shm(shmbuf)))
+                    .map(|()| (SyncPoint::signaled(), SharingBuf::Shm(shmbuf.layout)))
                 }
                 _ => Err(anyhow::anyhow!(
                     "unknown data type in dequeue_buffer_and_render"
@@ -1378,8 +1401,10 @@ impl Cast {
                     clear_dmabuf(renderer, dmabuf).map(|x| (x, SharingBuf::Dma))
                 }
                 x if x == DataType::MemFd.as_raw() => {
-                    let shmbuf = self.inner.borrow().shmbufs[&fd].clone();
-                    clear_shmbuf(&shmbuf).map(|()| (SyncPoint::signaled(), SharingBuf::Shm(shmbuf)))
+                    let inner = self.inner.borrow();
+                    let shmbuf = &inner.shmbufs[&fd];
+                    clear_shmbuf(shmbuf);
+                    Ok((SyncPoint::signaled(), SharingBuf::Shm(shmbuf.layout)))
                 }
                 _ => Err(anyhow::anyhow!(
                     "unknown data type in dequeue_buffer_and_clear"
@@ -1633,10 +1658,11 @@ fn allocate_dmabuf(
     Ok(dmabuf)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Shmbuf {
-    fd: Rc<OwnedFd>,
+    fd: OwnedFd,
     layout: ShmLayout,
+    mapping: ShmMapping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1668,7 +1694,7 @@ impl ShmLayout {
 
 enum SharingBuf {
     Dma,
-    Shm(Shmbuf),
+    Shm(ShmLayout),
 }
 
 fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
@@ -1681,9 +1707,13 @@ fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
     ftruncate(&fd, layout.size.into()).context("error setting size of the fd")?;
     fcntl_add_seals(&fd, SealFlags::SEAL | SealFlags::SHRINK | SealFlags::GROW)
         .context("error sealing the fd")?;
+    // SAFETY: The file has the requested size and is sealed against shrinking.
+    // We only access the mapping while we own the dequeued PipeWire buffer.
+    let mapping = unsafe { ShmMapping::new(fd.as_fd(), layout.size_usize()) }?;
     Ok(Shmbuf {
-        fd: fd.into(),
+        fd,
         layout,
+        mapping,
     })
 }
 
@@ -1723,8 +1753,8 @@ unsafe fn mark_buffer_as_good(pw_buffer: NonNull<pw_buffer>, sequence: &mut u64,
             // Clear the corrupted flag we may have set before.
             (*chunk).flags = SPA_CHUNK_FLAG_NONE as i32;
         }
-        SharingBuf::Shm(shmbuf) => {
-            (*chunk).size = shmbuf.layout.size;
+        SharingBuf::Shm(layout) => {
+            (*chunk).size = layout.size;
             (*chunk).flags = SPA_CHUNK_FLAG_NONE as i32;
         }
     }
@@ -1918,45 +1948,12 @@ fn render_to_shmbuf(
         .map_texture(&mapping)
         .context("error mapping texture")?;
 
-    unsafe {
-        let buf = mmap(
-            std::ptr::null_mut(),
-            buffer.layout.size_usize(),
-            ProtFlags::READ | ProtFlags::WRITE,
-            MapFlags::SHARED,
-            buffer.fd.clone(),
-            0,
-        )?;
-        {
-            let buf = slice::from_raw_parts_mut(buf.cast::<u8>(), buffer.layout.size_usize());
-            buf.copy_from_slice(bytes);
-        }
-        if let Err(err) = munmap(buf, buffer.layout.size_usize()) {
-            warn!("error unmapping shm buffer: {err:?}");
-        }
-    }
+    buffer.mapping.copy_frame(bytes);
     Ok(())
 }
 
-fn clear_shmbuf(buffer: &Shmbuf) -> anyhow::Result<()> {
-    unsafe {
-        let buf = mmap(
-            std::ptr::null_mut(),
-            buffer.layout.size_usize(),
-            ProtFlags::READ | ProtFlags::WRITE,
-            MapFlags::SHARED,
-            buffer.fd.clone(),
-            0,
-        )?;
-        {
-            let buf = slice::from_raw_parts_mut(buf.cast::<u8>(), buffer.layout.size_usize());
-            buf.fill(0);
-        }
-        if let Err(err) = munmap(buf, buffer.layout.size_usize()) {
-            warn!("error unmapping shm buffer: {err:?}");
-        }
-    }
-    Ok(())
+fn clear_shmbuf(buffer: &Shmbuf) {
+    buffer.mapping.clear();
 }
 
 #[cfg(test)]
