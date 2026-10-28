@@ -22,7 +22,7 @@ use crate::layout::{RenderLayer, SizingMode};
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::xray::XrayPos;
-use crate::render_helpers::RenderCtx;
+use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::utils::id::IdCounter;
 use crate::utils::transaction::{Transaction, TransactionBlocker};
 use crate::utils::ResizeEdge;
@@ -2967,9 +2967,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        cull_offscreen: bool,
         push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
+        let cull_offscreen = cull_offscreen
+            && ctx.target == RenderTarget::Output
+            && layer.is_normal()
+            && xray_pos.zoom == 1.
+            && xray_pos.pos_in_backdrop.x == 0.;
 
         // Draw the closing windows on top of the other windows.
         if layer.is_normal() {
@@ -3019,6 +3025,21 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 // So, let's just selectively ignore "visible" here when animating alpha.
                 let visible = visible || tile.alpha_animation.is_some();
                 if !visible {
+                    continue;
+                }
+
+                if cull_offscreen
+                    && tile.render_bounds().is_some_and(|bounds| {
+                        // Keep a physical pixel of slack for fractional-scale rounding.
+                        let left = tile_pos.x + bounds.loc.x;
+                        let right = left + bounds.size.w;
+                        let slack = 1. / self.scale;
+                        right < -slack || left > self.view_size.w + slack
+                    })
+                {
+                    // GLUE: Match Tile::render's reset for scanout feedback until the reset is
+                    // independent of rendering.
+                    tile.window().set_offscreen_data(None);
                     continue;
                 }
 

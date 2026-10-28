@@ -162,6 +162,13 @@ impl Shadow {
         }
     }
 
+    pub fn render_bounds(&self) -> Option<Rectangle<f64, Logical>> {
+        if !self.config.on {
+            return None;
+        }
+        self.shader_rects.iter().copied().reduce(|a, b| a.merge(b))
+    }
+
     pub fn render(
         &self,
         renderer: &mut impl NiriRenderer,

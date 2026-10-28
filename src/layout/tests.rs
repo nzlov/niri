@@ -15,6 +15,7 @@ use super::*;
 
 mod animations;
 mod fullscreen;
+mod render_visibility;
 
 impl<W: LayoutElement> Default for Layout<W> {
     fn default() -> Self {
@@ -28,6 +29,9 @@ struct TestWindowInner {
     parent_id: Cell<Option<usize>>,
     bbox: Cell<Rectangle<i32, Logical>>,
     initial_bbox: Rectangle<i32, Logical>,
+    render_bounds: Cell<Option<Rectangle<i32, Logical>>>,
+    render_count: Cell<usize>,
+    offscreen_reset_count: Cell<usize>,
     requested_size: Cell<Option<Size<i32, Logical>>>,
     // Emulates the window ignoring the compositor-provided size.
     forced_size: Cell<Option<Size<i32, Logical>>>,
@@ -81,6 +85,9 @@ impl TestWindow {
             parent_id: Cell::new(params.parent_id),
             bbox: Cell::new(params.bbox),
             initial_bbox: params.bbox,
+            render_bounds: Cell::new(None),
+            render_count: Cell::new(0),
+            offscreen_reset_count: Cell::new(0),
             requested_size: Cell::new(None),
             forced_size: Cell::new(None),
             min_size: params.min_max_size.0,
@@ -164,6 +171,21 @@ impl LayoutElement for TestWindow {
         (0, 0).into()
     }
 
+    fn render_bounds(&self) -> Option<Rectangle<i32, Logical>> {
+        self.0.render_bounds.get()
+    }
+
+    fn render_normal<R: NiriRenderer>(
+        &self,
+        _ctx: RenderCtx<R>,
+        _location: Point<f64, Logical>,
+        _scale: Scale<f64>,
+        _alpha: f32,
+        _push: &mut dyn FnMut(LayoutElementRenderElement<R>),
+    ) {
+        self.0.render_count.set(self.0.render_count.get() + 1);
+    }
+
     fn is_in_input_region(&self, _point: Point<f64, Logical>) -> bool {
         false
     }
@@ -209,7 +231,13 @@ impl LayoutElement for TestWindow {
 
     fn output_leave(&self, _output: &Output) {}
 
-    fn set_offscreen_data(&self, _data: Option<OffscreenData>) {}
+    fn set_offscreen_data(&self, data: Option<OffscreenData>) {
+        if data.is_none() {
+            self.0
+                .offscreen_reset_count
+                .set(self.0.offscreen_reset_count.get() + 1);
+        }
+    }
 
     fn set_activated(&mut self, active: bool) {
         self.0.pending_activated.set(active);

@@ -151,6 +151,13 @@ pub trait LayoutElement {
     /// I.e. if the element has CSD shadows, its buffer location will have negative coordinates.
     fn buf_loc(&self) -> Point<i32, Logical>;
 
+    /// Conservative bounds of all surfaces, including popups, relative to the visual geometry.
+    ///
+    /// Return `None` when the bounds are unknown to disable early render culling.
+    fn render_bounds(&self) -> Option<Rectangle<i32, Logical>> {
+        None
+    }
+
     /// Checks whether a point is in the element's input region.
     ///
     /// The point is relative to the element's visual geometry.

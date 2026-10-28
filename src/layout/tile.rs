@@ -464,6 +464,31 @@ impl<W: LayoutElement> Tile<W> {
                 .is_some_and(|alpha| !alpha.anim.is_done())
     }
 
+    /// Conservative bounds for ordinary tiles; animation shaders can extend arbitrarily.
+    pub fn render_bounds(&self) -> Option<Rectangle<f64, Logical>> {
+        if self.are_animations_ongoing() || self.alpha_animation.is_some() {
+            return None;
+        }
+
+        let mut surface_bounds = self.window.render_bounds()?.to_f64();
+        surface_bounds.loc += self.window_loc();
+
+        let ring_width = if self.focus_ring.is_off() {
+            0.
+        } else {
+            self.focus_ring.width()
+        };
+        let tile_bounds = Rectangle::new(
+            Point::from((-ring_width, -ring_width)),
+            self.tile_size() + Size::from((ring_width, ring_width)).upscale(2.),
+        );
+        let mut bounds = tile_bounds.merge(surface_bounds);
+        if let Some(shadow) = self.shadow.render_bounds() {
+            bounds = bounds.merge(shadow);
+        }
+        Some(bounds)
+    }
+
     pub fn is_moving_between_workspaces(&self) -> bool {
         self.move_y_animation
             .as_ref()

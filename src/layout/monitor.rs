@@ -1800,15 +1800,19 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
+                            false,
                             push!(),
                         );
                     }
                     _ => {
+                        // GLUE: The scrolling viewport only matches the output outside overview
+                        // and workspace switches; keep culling here until it accepts a viewport.
                         ws.render_scrolling(
                             ctx.r(),
                             xray_pos,
                             focus_ring,
                             RenderLayer::Normal,
+                            self.overview_progress.is_none() && self.workspace_switch.is_none(),
                             push!(),
                         );
                     }
