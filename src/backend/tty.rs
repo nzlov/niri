@@ -141,7 +141,11 @@ pub type TtyRendererError<'render> = <TtyRenderer<'render> as RendererSuper>::Er
 type GbmDrmCompositor = DrmCompositor<
     GbmAllocator<DeviceFd>,
     GbmFramebufferExporter<DeviceFd>,
-    (OutputPresentationFeedback, Duration),
+    (
+        OutputPresentationFeedback,
+        Duration,
+        niri_ipc::OutputPresentedFrame,
+    ),
     DeviceFd,
 >;
 
@@ -407,6 +411,7 @@ struct Surface {
     /// = SDR. Blend changes alter shader output without damaging anything, so a change forces
     /// a full redraw.
     last_blend: Option<Option<f64>>,
+    last_presented_frame: Option<niri_ipc::OutputPresentedFrame>,
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     gamma_props: Option<GammaProps>,
     /// Gamma change to apply upon session resume.
@@ -1864,6 +1869,7 @@ impl Tty {
             max_bpc_range,
             failed_color_state: None,
             last_blend: None,
+            last_presented_frame: None,
             compositor,
             dmabuf_feedback,
             gamma_props,
@@ -2068,7 +2074,20 @@ impl Tty {
 
         // Mark the last frame as submitted.
         match surface.compositor.frame_submitted() {
-            Ok(Some((mut feedback, target_presentation_time))) => {
+            Ok(Some((mut feedback, target_presentation_time, diagnostics))) => {
+                surface.last_presented_frame = Some(diagnostics.clone());
+                // Only publish after KMS completion; do not emit output-change events.
+                if let Some(entry) = self
+                    .ipc_outputs
+                    .lock()
+                    .unwrap()
+                    .values_mut()
+                    .find(|entry| entry.name == output.name())
+                {
+                    if let Some(render) = entry.render_diagnostics.as_mut() {
+                        render.last_presented_frame = Some(diagnostics);
+                    }
+                }
                 let refresh = match refresh_interval {
                     Some(refresh) => {
                         if output_state.frame_clock.vrr() {
@@ -2303,6 +2322,16 @@ impl Tty {
             }
         };
 
+        let fullscreen_hdr_content = niri
+            .output_hdr_image_description(output)
+            .map(|desc| {
+                match crate::render_helpers::blend::ContentColor::from_description(Some(desc)) {
+                    crate::render_helpers::blend::ContentColor::Linear { .. } => "linear",
+                    _ => "pq",
+                }
+            })
+            .unwrap_or("no-fullscreen-hdr-description");
+
         // Render the elements.
         let ctx = RenderCtx {
             renderer: &mut renderer,
@@ -2369,6 +2398,8 @@ impl Tty {
         set_frame_blend(renderer.as_gles_renderer(), None);
         match render_frame_result {
             Ok(res) => {
+                let primary_plane_composited =
+                    matches!(&res.primary_element, PrimaryPlaneElement::Swapchain(_));
                 let needs_sync = res.needs_sync()
                     || self
                         .config
@@ -2392,7 +2423,16 @@ impl Tty {
                 if !res.is_empty {
                     let presentation_feedbacks =
                         niri.take_presentation_feedbacks(output, &res.states);
-                    let data = (presentation_feedbacks, target_presentation_time);
+                    let diagnostics = niri_ipc::OutputPresentedFrame {
+                        primary_plane_composited,
+                        hdr_signalling: drm_compositor.pending_color_state().hdr_metadata.is_some(),
+                        fullscreen_hdr_content: fullscreen_hdr_content.into(),
+                    };
+                    let data = (
+                        presentation_feedbacks,
+                        target_presentation_time,
+                        diagnostics,
+                    );
 
                     match drm_compositor.queue_frame(data) {
                         Ok(()) => {
@@ -2652,6 +2692,19 @@ impl Tty {
                     vrr_enabled,
                     logical,
                     max_bpc,
+                    render_diagnostics: Some(niri_ipc::OutputRenderDiagnostics {
+                        render_device: self
+                            .primary_render_node
+                            .dev_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| self.primary_render_node.to_string()),
+                        scanout_device: node
+                            .dev_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| node.to_string()),
+                        cross_gpu: device.render_node != Some(self.primary_render_node),
+                        last_presented_frame: surface.and_then(|s| s.last_presented_frame.clone()),
+                    }),
                 };
 
                 ipc_outputs.insert(id, ipc_output);

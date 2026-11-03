@@ -1253,6 +1253,35 @@ pub struct Output {
     pub logical: Option<LogicalOutput>,
     /// Maximum bits per channel (bit depth), if known.
     pub max_bpc: Option<u8>,
+    /// DRM rendering topology and the last KMS-completed frame, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_diagnostics: Option<OutputRenderDiagnostics>,
+}
+
+/// DRM output diagnostics. KMS completion does not measure optical display latency.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct OutputRenderDiagnostics {
+    /// Compositor rendering device.
+    pub render_device: String,
+    /// Display scanout device.
+    pub scanout_device: String,
+    /// Whether rendering and scanout use different devices.
+    pub cross_gpu: bool,
+    /// Last KMS-completed frame; absent before the first frame or after output recreation.
+    pub last_presented_frame: Option<OutputPresentedFrame>,
+}
+
+/// Snapshot associated with a completed DRM frame.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct OutputPresentedFrame {
+    /// Whether the primary plane used a compositor swapchain. Other planes may still be used.
+    pub primary_plane_composited: bool,
+    /// Whether HDR signalling was staged in the successfully completed DRM frame.
+    pub hdr_signalling: bool,
+    /// Fullscreen HDR content classification: pq, linear, or no-fullscreen-hdr-description.
+    pub fullscreen_hdr_content: String,
 }
 
 /// Output mode.
@@ -2203,5 +2232,43 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod output_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn old_output_response_remains_readable() {
+        let output: Output = serde_json::from_value(serde_json::json!({
+            "name": "DP-1", "make": "test", "model": "test", "serial": null,
+            "physical_size": null, "modes": [], "current_mode": null,
+            "is_custom_mode": false, "vrr_supported": false, "vrr_enabled": false,
+            "logical": null, "max_bpc": null
+        }))
+        .unwrap();
+        assert!(output.render_diagnostics.is_none());
+        assert!(serde_json::to_value(output)
+            .unwrap()
+            .get("render_diagnostics")
+            .is_none());
+    }
+
+    #[test]
+    fn completed_frame_diagnostics_roundtrip() {
+        let diagnostics = OutputRenderDiagnostics {
+            render_device: "renderD129".into(),
+            scanout_device: "card1".into(),
+            cross_gpu: true,
+            last_presented_frame: Some(OutputPresentedFrame {
+                primary_plane_composited: true,
+                hdr_signalling: true,
+                fullscreen_hdr_content: "linear".into(),
+            }),
+        };
+        let decoded: OutputRenderDiagnostics =
+            serde_json::from_value(serde_json::to_value(&diagnostics).unwrap()).unwrap();
+        assert_eq!(diagnostics, decoded);
     }
 }

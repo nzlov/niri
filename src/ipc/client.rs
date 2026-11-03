@@ -601,10 +601,35 @@ fn print_output(output: Output) -> anyhow::Result<()> {
         vrr_enabled,
         logical,
         max_bpc,
+        render_diagnostics,
     } = output;
 
     let serial = serial.as_deref().unwrap_or("Unknown");
     println!(r#"Output "{make} {model} {serial}" ({name})"#);
+
+    if let Some(d) = render_diagnostics {
+        println!("  Rendering device: {}", d.render_device);
+        println!("  Scanout device: {}", d.scanout_device);
+        println!("  Cross-GPU rendering: {}", d.cross_gpu);
+        if let Some(frame) = d.last_presented_frame {
+            println!("  Last presented frame (KMS completion):");
+            println!(
+                "    Primary plane: {}",
+                if frame.primary_plane_composited {
+                    "composited"
+                } else {
+                    "direct scanout"
+                }
+            );
+            println!("    HDR signalling: {}", frame.hdr_signalling);
+            println!(
+                "    Fullscreen HDR content: {}",
+                frame.fullscreen_hdr_content
+            );
+        } else {
+            println!("  Last presented frame: unavailable");
+        }
+    }
 
     let print_qualifier = |is_preferred: bool, is_current: bool, is_custom_mode: bool| {
         let mut qualifier = Vec::new();

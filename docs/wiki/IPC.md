@@ -79,3 +79,9 @@ Please prefer the JSON output for scripts, since I reserve the right to make any
 
 The `niri-ipc` sub-crate (like other niri sub-crates) is *not* API-stable in terms of the Rust semver; rather, it follows the version of niri itself.
 In particular, new struct fields and enum variants will be added.
+
+### Output rendering diagnostics
+
+`niri msg outputs` (or `niri msg --json outputs`) includes DRM render/scanout devices and whether they differ. The last presented frame snapshot is updated after KMS completion, not merely after rendering or queuing. It does not measure optical presentation latency or game FPS. The primary-plane classification does not describe overlay or cursor planes. HDR signalling is the DRM color state staged for that completed frame; Fullscreen content describes the first HDR description found in the active fullscreen surface tree, not necessarily the primary-plane buffer. The value `linear` includes scRGB, while `no-fullscreen-hdr-description` does not establish that every visible surface is SDR.
+
+The snapshot is historical when the output is idle, unavailable before the first completed frame, and cleared when the output surface is recreated. Non-DRM backends omit the diagnostics. Reading outputs does not force a redraw or emit a stream of diagnostic events. Cross-GPU topology does not prove a CPU copy or quantify its cost.
