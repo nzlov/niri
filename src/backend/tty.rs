@@ -30,6 +30,7 @@ use smithay::backend::drm::{
 };
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
+use smithay::backend::input::InputTime;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -690,7 +691,7 @@ impl Tty {
                 // Slightly cursed to do from an idle... But we don't have State here conveniently,
                 // and it should be fine to delay this until the loop callback.
                 niri.event_loop
-                    .insert_idle(|state| state.release_held_inputs());
+                    .insert_idle(|state| state.release_held_inputs(InputTime::now()));
 
                 self.libinput.suspend();
 

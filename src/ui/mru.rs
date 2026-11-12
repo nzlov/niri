@@ -1595,7 +1595,7 @@ impl Inner {
 
         for (thumbnail, geo) in self.thumbnails_in_view_render() {
             let id = thumbnail.id;
-            let Some((_, mapped)) = niri.layout.windows().find(|(_, m)| m.id() == id) else {
+            let Some((mapped, _)) = niri.find_mapped_output_by_id(id) else {
                 error!("window in the MRU must be present in the layout");
                 continue;
             };
@@ -1843,6 +1843,7 @@ fn make_preset_opened_binds() -> Vec<Bind> {
             },
             action: BoundAction::Press(action),
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: false,
